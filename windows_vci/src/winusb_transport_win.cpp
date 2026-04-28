@@ -3,9 +3,9 @@
 #include <cstring>
 #include <vector>
 
+#include <windows.h>
 #include <setupapi.h>
 #include <usb.h>
-#include <windows.h>
 #include <winusb.h>
 
 namespace {
