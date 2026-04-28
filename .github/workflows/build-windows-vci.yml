@@ -1,0 +1,41 @@
+name: Build Windows VCI DLL
+
+on:
+  push:
+    paths:
+      - "windows_vci/**"
+      - ".github/workflows/build-windows-vci.yml"
+  pull_request:
+    paths:
+      - "windows_vci/**"
+      - ".github/workflows/build-windows-vci.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Win32
+            artifact: pico_j2534-win32
+          - platform: x64
+            artifact: pico_j2534-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S windows_vci -B build/windows_vci-${{ matrix.platform }} -A ${{ matrix.platform }}
+
+      - name: Build
+        run: cmake --build build/windows_vci-${{ matrix.platform }} --config Release
+
+      - name: Upload DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: build/windows_vci-${{ matrix.platform }}/Release/pico_j2534.dll

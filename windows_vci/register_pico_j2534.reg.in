@@ -1,0 +1,24 @@
+Windows Registry Editor Version 5.00
+
+; Replace @DLL_PATH@ with the absolute path to pico_j2534.dll.
+; For 64-bit applications on 64-bit Windows:
+[HKEY_LOCAL_MACHINE\SOFTWARE\PassThruSupport.04.04\pico_j2534]
+"Name"="RP2350 Pico J2534"
+"Vendor"="pico-j2534"
+"FunctionLibrary"="@DLL_PATH@"
+"ConfigApplication"=""
+"Protocol"=dword:00000060
+"DeviceAvailable"=dword:00000001
+"CAN"=dword:00000001
+"ISO15765"=dword:00000001
+
+; For 32-bit applications such as many DTS Monaco installs:
+[HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\PassThruSupport.04.04\pico_j2534]
+"Name"="RP2350 Pico J2534"
+"Vendor"="pico-j2534"
+"FunctionLibrary"="@DLL_PATH@"
+"ConfigApplication"=""
+"Protocol"=dword:00000060
+"DeviceAvailable"=dword:00000001
+"CAN"=dword:00000001
+"ISO15765"=dword:00000001
