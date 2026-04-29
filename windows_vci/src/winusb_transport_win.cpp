@@ -59,9 +59,11 @@ bool WinUsbTransport::open() {
     std::lock_guard<std::mutex> lock(ioMutex_);
     close();
 
-    auto openByGuid = [this](const GUID& guid, bool requirePicoPath) {
+    std::string openError = "Pico J2534 WinUSB interface not found";
+    auto openByGuid = [this, &openError](const GUID& guid, bool requirePicoPath) {
         HDEVINFO devInfo = SetupDiGetClassDevsW(&guid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
         if (devInfo == INVALID_HANDLE_VALUE) {
+            openError = windowsError("SetupDiGetClassDevs failed", GetLastError());
             return false;
         }
 
@@ -90,20 +92,23 @@ bool WinUsbTransport::open() {
                                         FILE_SHARE_READ | FILE_SHARE_WRITE,
                                         nullptr,
                                         OPEN_EXISTING,
-                                        FILE_ATTRIBUTE_NORMAL,
+                                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
                                         nullptr);
             if (device == INVALID_HANDLE_VALUE) {
+                openError = windowsError("CreateFile failed for Pico J2534 WinUSB interface", GetLastError());
                 continue;
             }
 
             WINUSB_INTERFACE_HANDLE usb = nullptr;
             if (!WinUsb_Initialize(device, &usb)) {
+                openError = windowsError("WinUsb_Initialize failed for Pico J2534 interface", GetLastError());
                 CloseHandle(device);
                 continue;
             }
 
             USB_INTERFACE_DESCRIPTOR iface{};
             if (!WinUsb_QueryInterfaceSettings(usb, 0, &iface)) {
+                openError = windowsError("WinUsb_QueryInterfaceSettings failed for Pico J2534 interface", GetLastError());
                 WinUsb_Free(usb);
                 CloseHandle(device);
                 continue;
@@ -132,6 +137,7 @@ bool WinUsbTransport::open() {
                 return true;
             }
 
+            openError = "Pico J2534 WinUSB interface has no bulk IN/OUT pipes";
             WinUsb_Free(usb);
             CloseHandle(device);
         }
@@ -145,7 +151,7 @@ bool WinUsbTransport::open() {
         return true;
     }
 
-    setError("Pico J2534 WinUSB interface not found");
+    setError(openError);
     return false;
 }
 
