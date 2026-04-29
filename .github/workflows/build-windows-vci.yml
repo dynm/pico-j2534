@@ -33,7 +33,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configure
         run: cmake -S windows_vci -B build/windows_vci-${{ matrix.platform }} -A ${{ matrix.platform }}
@@ -54,7 +54,7 @@ jobs:
           Compress-Archive -Path "$packageDir/*" -DestinationPath "build/package/${{ matrix.artifact }}.zip" -Force
 
       - name: Upload DLL and VIN smoke test
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -70,7 +70,7 @@ jobs:
 
     steps:
       - name: Download packaged artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: pico_j2534-*
           path: release-assets
