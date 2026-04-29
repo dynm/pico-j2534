@@ -3,7 +3,7 @@
 #include "pico_j2534_protocol.h"
 
 #ifndef CFG_TUSB_MCU
-#define CFG_TUSB_MCU OPT_MCU_RP2040
+#define CFG_TUSB_MCU OPT_MCU_RP2350
 #endif
 
 #ifndef CFG_TUSB_OS
