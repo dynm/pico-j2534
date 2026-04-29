@@ -13,6 +13,8 @@ static bool can_ready = false;
 static bool can_error = false;
 static uint32_t led_activity_until_ms = 0;
 
+#define PICOJ_USB_REPLY_TIMEOUT_MS 50u
+
 static void led_write(bool on) {
     gpio_put(PICOJ_STATUS_LED_PIN, PICOJ_STATUS_LED_ACTIVE_HIGH ? on : !on);
 }
@@ -46,9 +48,17 @@ static void led_update(void) {
     led_write(on);
 }
 
-static void send_packet(uint8_t seq, uint8_t cmd, const void* payload, uint8_t len) {
-    if (!tud_vendor_mounted() || tud_vendor_write_available() < sizeof(picoj_packet_t)) {
-        return;
+static bool send_packet(uint8_t seq, uint8_t cmd, const void* payload, uint8_t len, uint32_t timeout_ms) {
+    if (!tud_vendor_mounted()) {
+        return false;
+    }
+
+    const uint32_t start = millis();
+    while (tud_vendor_write_available() < sizeof(picoj_packet_t)) {
+        if (timeout_ms == 0 || millis() - start >= timeout_ms) {
+            return false;
+        }
+        tud_task();
     }
 
     picoj_packet_t packet;
@@ -63,6 +73,7 @@ static void send_packet(uint8_t seq, uint8_t cmd, const void* payload, uint8_t l
     tud_vendor_write(&packet, sizeof(packet));
     tud_vendor_write_flush();
     led_mark_activity();
+    return true;
 }
 
 static void send_status(uint8_t seq, int32_t code, uint32_t detail) {
@@ -70,7 +81,7 @@ static void send_status(uint8_t seq, int32_t code, uint32_t detail) {
         .code = code,
         .detail = detail,
     };
-    send_packet(seq, PICOJ_CMD_STATUS, &status, sizeof(status));
+    send_packet(seq, PICOJ_CMD_STATUS, &status, sizeof(status), PICOJ_USB_REPLY_TIMEOUT_MS);
 }
 
 static void process_host_packet(const picoj_packet_t* packet) {
@@ -85,7 +96,7 @@ static void process_host_packet(const picoj_packet_t* packet) {
             .max_channels = 1,
             .reserved = 0,
         };
-        send_packet(packet->seq, PICOJ_CMD_HELLO, &hello, sizeof(hello));
+        send_packet(packet->seq, PICOJ_CMD_HELLO, &hello, sizeof(hello), PICOJ_USB_REPLY_TIMEOUT_MS);
         break;
     }
     case PICOJ_CMD_SET_BITRATE: {
@@ -143,7 +154,7 @@ int main(void) {
 
         if (can_ready && tud_vendor_mounted() && mcp2515_read(&frame)) {
             led_mark_activity();
-            send_packet(0, PICOJ_CMD_CAN_RX, &frame, sizeof(frame));
+            send_packet(0, PICOJ_CMD_CAN_RX, &frame, sizeof(frame), 0);
         }
     }
 }

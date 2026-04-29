@@ -88,6 +88,39 @@ void logUnsupported(const char* function, const char* format, ...) {
     logEvent(function, "unsupported: %s", details);
 }
 
+void logReadMsgsCall(unsigned long channelId, PASSTHRU_MSG* pMsg, unsigned long* pNumMsgs, unsigned long timeout) {
+    if (timeout != 0) {
+        logEvent("PassThruReadMsgs",
+                 "ChannelID=%lu Msg=%p NumMsgs=%p Requested=%lu Timeout=%lu",
+                 channelId,
+                 static_cast<void*>(pMsg),
+                 static_cast<void*>(pNumMsgs),
+                 pNumMsgs ? *pNumMsgs : 0,
+                 timeout);
+        return;
+    }
+
+    static std::mutex logLock;
+    static DWORD lastLogMs = 0;
+    static unsigned long suppressedCalls = 0;
+
+    std::lock_guard<std::mutex> lock(logLock);
+    const DWORD now = GetTickCount();
+    if (lastLogMs == 0 || now - lastLogMs >= 1000) {
+        logEvent("PassThruReadMsgs",
+                 "ChannelID=%lu Msg=%p NumMsgs=%p Requested=%lu Timeout=0 SuppressedZeroTimeoutReads=%lu",
+                 channelId,
+                 static_cast<void*>(pMsg),
+                 static_cast<void*>(pNumMsgs),
+                 pNumMsgs ? *pNumMsgs : 0,
+                 suppressedCalls);
+        suppressedCalls = 0;
+        lastLogMs = now;
+    } else {
+        ++suppressedCalls;
+    }
+}
+
 uint32_t readCanId(const PASSTHRU_MSG& msg) {
     if (msg.DataSize < 4) {
         return 0;
@@ -301,13 +334,7 @@ extern "C" long WINAPI PassThruDisconnect(unsigned long ChannelID) {
 }
 
 extern "C" long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG* pMsg, unsigned long* pNumMsgs, unsigned long Timeout) {
-    logEvent("PassThruReadMsgs",
-             "ChannelID=%lu Msg=%p NumMsgs=%p Requested=%lu Timeout=%lu",
-             ChannelID,
-             static_cast<void*>(pMsg),
-             static_cast<void*>(pNumMsgs),
-             pNumMsgs ? *pNumMsgs : 0,
-             Timeout);
+    logReadMsgsCall(ChannelID, pMsg, pNumMsgs, Timeout);
     if (!pMsg || !pNumMsgs) {
         setLastError("Null read message argument");
         return ERR_NULL_PARAMETER;
@@ -322,19 +349,23 @@ extern "C" long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG* p
     const unsigned long requested = *pNumMsgs;
     *pNumMsgs = 0;
     const DWORD start = GetTickCount();
+    const bool nonBlocking = Timeout == 0;
 
     while (*pNumMsgs < requested) {
         DWORD elapsed = GetTickCount() - start;
-        if (elapsed >= Timeout && *pNumMsgs == 0) {
-            setLastError("Read timed out");
-            return ERR_BUFFER_EMPTY;
-        }
-        if (elapsed >= Timeout) {
-            return STATUS_NOERROR;
+        if (!nonBlocking) {
+            if (elapsed >= Timeout && *pNumMsgs == 0) {
+                setLastError("Read timed out");
+                return ERR_BUFFER_EMPTY;
+            }
+            if (elapsed >= Timeout) {
+                return STATUS_NOERROR;
+            }
         }
 
         picoj_packet_t packet{};
-        if (!g_usb.readPacket(packet, Timeout - elapsed)) {
+        const unsigned readTimeout = nonBlocking ? 1u : Timeout - elapsed;
+        if (!g_usb.readPacket(packet, readTimeout)) {
             setLastError(g_usb.lastError());
             return *pNumMsgs ? STATUS_NOERROR : ERR_BUFFER_EMPTY;
         }
