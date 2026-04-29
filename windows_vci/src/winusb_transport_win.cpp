@@ -1,8 +1,6 @@
 #include "winusb_transport_win.h"
 
-#include <algorithm>
 #include <cstdio>
-#include <cwctype>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -19,31 +17,12 @@ constexpr GUID kPicoJ2534InterfaceGuid = {
     0xa9f78e2a, 0x39a0, 0x4a36, {0xa6, 0xdf, 0x6d, 0x80, 0xc9, 0x6f, 0x54, 0xe1}
 };
 
-// Windows' default WinUSB device interface class. Used if DeviceInterfaceGUIDs
-// from the MS OS descriptor did not get registered by the host.
-constexpr GUID kDefaultWinUsbInterfaceGuid = {
-    0xdee824ef, 0x729b, 0x4a0e, {0x9c, 0x14, 0xb7, 0x11, 0x7d, 0x33, 0xa8, 0x17}
-};
-
 constexpr uint8_t kInvalidPipe = 0;
 
 std::string windowsError(const char* prefix, DWORD error) {
     char buffer[160]{};
     std::snprintf(buffer, sizeof(buffer), "%s (GetLastError=%lu)", prefix, static_cast<unsigned long>(error));
     return buffer;
-}
-
-std::wstring lowerPath(const wchar_t* path) {
-    std::wstring lowered = path ? path : L"";
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](wchar_t ch) {
-        return static_cast<wchar_t>(std::towlower(ch));
-    });
-    return lowered;
-}
-
-bool isPicoJ2534InterfacePath(const wchar_t* path) {
-    const std::wstring lowered = lowerPath(path);
-    return lowered.find(L"vid_1209&pid_2534") != std::wstring::npos;
 }
 
 }
@@ -60,7 +39,7 @@ bool WinUsbTransport::open() {
     close();
 
     std::string openError = "Pico J2534 WinUSB interface not found";
-    auto openByGuid = [this, &openError](const GUID& guid, bool requirePicoPath) {
+    auto openByGuid = [this, &openError](const GUID& guid) {
         HDEVINFO devInfo = SetupDiGetClassDevsW(&guid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
         if (devInfo == INVALID_HANDLE_VALUE) {
             openError = windowsError("SetupDiGetClassDevs failed", GetLastError());
@@ -83,10 +62,6 @@ bool WinUsbTransport::open() {
             if (!SetupDiGetDeviceInterfaceDetailW(devInfo, &ifData, detail, needed, nullptr, nullptr)) {
                 continue;
             }
-            if (requirePicoPath && !isPicoJ2534InterfacePath(detail->DevicePath)) {
-                continue;
-            }
-
             HANDLE device = CreateFileW(detail->DevicePath,
                                         GENERIC_READ | GENERIC_WRITE,
                                         FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -146,8 +121,7 @@ bool WinUsbTransport::open() {
         return false;
     };
 
-    if (openByGuid(kPicoJ2534InterfaceGuid, false) ||
-        openByGuid(kDefaultWinUsbInterfaceGuid, true)) {
+    if (openByGuid(kPicoJ2534InterfaceGuid)) {
         return true;
     }
 
