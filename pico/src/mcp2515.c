@@ -90,8 +90,8 @@ static bool set_cnf(uint32_t bitrate) {
 #if PICOJ_MCP2515_OSC_HZ == 16000000u
     if (bitrate == 500000u) {
         write_reg(CNF1, 0x00);
-        write_reg(CNF2, 0xD1);
-        write_reg(CNF3, 0x81);
+        write_reg(CNF2, 0xF0);
+        write_reg(CNF3, 0x86);
         return true;
     }
     if (bitrate == 250000u) {
