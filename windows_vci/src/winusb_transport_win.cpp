@@ -239,19 +239,40 @@ bool WinUsbTransport::writePacketUnlocked(const picoj_packet_t& packet, unsigned
 }
 
 bool WinUsbTransport::readPacketUnlocked(picoj_packet_t& packet, unsigned timeoutMs) {
-    ULONG timeout = timeoutMs;
-    WinUsb_SetPipePolicy(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_), bulkIn_, PIPE_TRANSFER_TIMEOUT, sizeof(timeout), &timeout);
+    std::memset(&packet, 0, sizeof(packet));
+    auto* out = reinterpret_cast<uint8_t*>(&packet);
+    ULONG total = 0;
+    const DWORD start = GetTickCount();
 
-    ULONG transferred = 0;
-    if (!WinUsb_ReadPipe(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_),
-                         bulkIn_,
-                         reinterpret_cast<uint8_t*>(&packet),
-                         sizeof(packet),
-                         &transferred,
-                         nullptr) ||
-        transferred != sizeof(packet)) {
-        setError(windowsError("WinUSB bulk read failed", GetLastError()));
-        return false;
+    while (total < sizeof(packet)) {
+        const DWORD elapsed = GetTickCount() - start;
+        if (elapsed >= timeoutMs) {
+            char buffer[160]{};
+            std::snprintf(buffer, sizeof(buffer), "WinUSB bulk read timed out after %lu of %zu bytes",
+                          static_cast<unsigned long>(total), sizeof(packet));
+            setError(buffer);
+            return false;
+        }
+
+        ULONG timeout = timeoutMs - elapsed;
+        WinUsb_SetPipePolicy(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_), bulkIn_, PIPE_TRANSFER_TIMEOUT, sizeof(timeout), &timeout);
+
+        ULONG transferred = 0;
+        if (!WinUsb_ReadPipe(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_),
+                             bulkIn_,
+                             out + total,
+                             static_cast<ULONG>(sizeof(packet) - total),
+                             &transferred,
+                             nullptr)) {
+            setError(windowsError("WinUSB bulk read failed", GetLastError()));
+            return false;
+        }
+
+        if (transferred == 0) {
+            Sleep(1);
+            continue;
+        }
+        total += transferred;
     }
 
     if (packet.magic != PICOJ_PACKET_MAGIC || packet.len > PICOJ_PACKET_PAYLOAD_SIZE) {
