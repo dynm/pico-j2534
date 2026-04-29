@@ -1,10 +1,12 @@
 #include "j2534.h"
 
 #include <windows.h>
+#include <setupapi.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cwctype>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -18,6 +20,16 @@ constexpr unsigned long kObdResponseMask = 0x7F8;
 constexpr unsigned long kCanBaudrate = 500000;
 constexpr unsigned long kReadTimeoutMs = 250;
 constexpr unsigned long kTotalReadTimeMs = 5000;
+
+constexpr GUID kPicoJ2534InterfaceGuid = {
+    0xa9f78e2a, 0x39a0, 0x4a36, {0xa6, 0xdf, 0x6d, 0x80, 0xc9, 0x6f, 0x54, 0xe1}
+};
+constexpr GUID kDefaultWinUsbInterfaceGuid = {
+    0xdee824ef, 0x729b, 0x4a0e, {0x9c, 0x14, 0xb7, 0x11, 0x7d, 0x33, 0xa8, 0x17}
+};
+constexpr GUID kUsbDeviceInterfaceGuid = {
+    0xa5dcbf10, 0x6530, 0x11d2, {0x90, 0x1f, 0x00, 0xc0, 0x4f, 0xb9, 0x51, 0xed}
+};
 
 using PassThruOpenFn = long(WINAPI*)(void*, unsigned long*);
 using PassThruCloseFn = long(WINAPI*)(unsigned long);
@@ -80,6 +92,64 @@ std::string windowsError(DWORD error) {
         LocalFree(text);
     }
     return result;
+}
+
+std::wstring lowerPath(const wchar_t* path) {
+    std::wstring lowered = path ? path : L"";
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(std::towlower(ch));
+    });
+    return lowered;
+}
+
+void listInterfacesForGuid(const char* label, const GUID& guid) {
+    std::cout << "\n[" << label << "]\n";
+    HDEVINFO devInfo = SetupDiGetClassDevsW(&guid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (devInfo == INVALID_HANDLE_VALUE) {
+        std::cout << "  SetupDiGetClassDevs failed: " << windowsError(GetLastError()) << "\n";
+        return;
+    }
+
+    bool any = false;
+    SP_DEVICE_INTERFACE_DATA ifData{};
+    ifData.cbSize = sizeof(ifData);
+    for (DWORD index = 0; SetupDiEnumDeviceInterfaces(devInfo, nullptr, &guid, index, &ifData); ++index) {
+        DWORD needed = 0;
+        SetupDiGetDeviceInterfaceDetailW(devInfo, &ifData, nullptr, 0, &needed, nullptr);
+        if (needed == 0) {
+            continue;
+        }
+
+        std::vector<unsigned char> detailBuf(needed);
+        auto* detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(detailBuf.data());
+        detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+        if (!SetupDiGetDeviceInterfaceDetailW(devInfo, &ifData, detail, needed, nullptr, nullptr)) {
+            std::cout << "  detail failed: " << windowsError(GetLastError()) << "\n";
+            continue;
+        }
+
+        any = true;
+        const std::wstring lowered = lowerPath(detail->DevicePath);
+        const bool isPico = lowered.find(L"vid_1209&pid_2534") != std::wstring::npos;
+        std::wcout << L"  " << (isPico ? L"* " : L"  ") << detail->DevicePath << L"\n";
+    }
+
+    const DWORD last = GetLastError();
+    if (!any) {
+        std::cout << "  no present interfaces";
+        if (last != ERROR_NO_MORE_ITEMS) {
+            std::cout << " (" << windowsError(last) << ")";
+        }
+        std::cout << "\n";
+    }
+    SetupDiDestroyDeviceInfoList(devInfo);
+}
+
+void listUsbInterfaces() {
+    std::cout << "Listing present device interfaces. Lines marked with * contain VID_1209&PID_2534.\n";
+    listInterfacesForGuid("Pico J2534 custom GUID {A9F78E2A-39A0-4A36-A6DF-6D80C96F54E1}", kPicoJ2534InterfaceGuid);
+    listInterfacesForGuid("Default WinUSB GUID {DEE824EF-729B-4A0E-9C14-B7117D33A817}", kDefaultWinUsbInterfaceGuid);
+    listInterfacesForGuid("USB device GUID {A5DCBF10-6530-11D2-901F-00C04FB951ED}", kUsbDeviceInterfaceGuid);
 }
 
 template <typename Fn>
@@ -234,8 +304,9 @@ bool readVin(const J2534Api& api) {
 
 void printUsage(const char* exeName) {
     std::cerr
-        << "Usage: " << exeName << " [--check-exports] [pico_j2534.dll]\n"
+        << "Usage: " << exeName << " [--check-exports] [--list-interfaces] [pico_j2534.dll]\n"
         << "\n"
+        << "--list-interfaces prints USB/WinUSB device interface paths for driver troubleshooting.\n"
         << "Without --check-exports, opens the DLL through J2534 and sends OBD-II service 09 PID 02\n"
         << "over ISO15765 at 500 kbit/s to read and print the vehicle VIN.\n";
 }
@@ -244,6 +315,7 @@ void printUsage(const char* exeName) {
 
 int main(int argc, char** argv) {
     bool checkExportsOnly = false;
+    bool listInterfacesOnly = false;
     const char* dllPath = "pico_j2534.dll";
 
     for (int i = 1; i < argc; ++i) {
@@ -256,7 +328,16 @@ int main(int argc, char** argv) {
             checkExportsOnly = true;
             continue;
         }
+        if (arg == "--list-interfaces") {
+            listInterfacesOnly = true;
+            continue;
+        }
         dllPath = argv[i];
+    }
+
+    if (listInterfacesOnly) {
+        listUsbInterfaces();
+        return 0;
     }
 
     J2534Api api{};

@@ -43,8 +43,7 @@ std::wstring lowerPath(const wchar_t* path) {
 
 bool isPicoJ2534InterfacePath(const wchar_t* path) {
     const std::wstring lowered = lowerPath(path);
-    return lowered.find(L"vid_1209&pid_2534") != std::wstring::npos &&
-           lowered.find(L"mi_02") != std::wstring::npos;
+    return lowered.find(L"vid_1209&pid_2534") != std::wstring::npos;
 }
 
 }

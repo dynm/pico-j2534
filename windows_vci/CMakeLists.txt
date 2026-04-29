@@ -29,6 +29,7 @@ add_executable(vin_smoke_test
 target_compile_features(vin_smoke_test PRIVATE cxx_std_17)
 target_include_directories(vin_smoke_test PRIVATE include)
 target_compile_definitions(vin_smoke_test PRIVATE WIN32_LEAN_AND_MEAN)
+target_link_libraries(vin_smoke_test PRIVATE setupapi)
 
 if(BUILD_TESTING)
     add_test(
