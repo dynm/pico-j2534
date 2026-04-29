@@ -2,17 +2,8 @@ name: Build Windows VCI DLL
 
 on:
   push:
-    branches:
-      - "main"
     tags:
       - "v*"
-    paths:
-      - "windows_vci/**"
-      - ".github/workflows/build-windows-vci.yml"
-  pull_request:
-    paths:
-      - "windows_vci/**"
-      - ".github/workflows/build-windows-vci.yml"
   workflow_dispatch:
 
 permissions:

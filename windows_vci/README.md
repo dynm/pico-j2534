@@ -15,7 +15,7 @@ cmake --build build/windows_vci --config Release
 
 Many DTS Monaco installations are 32-bit, so build `Win32` first. If your Monaco install is 64-bit, build with `-A x64` and register the 64-bit DLL path.
 
-You can also build the DLL with GitHub Actions. The workflow at `.github/workflows/build-windows-vci.yml` builds both `Win32` and `x64` on `windows-latest` and uploads matching `pico_j2534.dll` and `vin_smoke_test.exe` artifacts. On `v*` tag builds, it also attaches `pico_j2534-win32.zip` and `pico_j2534-x64.zip` to the GitHub Release.
+You can also build the DLL with GitHub Actions. The workflow at `.github/workflows/build-windows-vci.yml` builds both `Win32` and `x64` on `windows-latest` for `v*` tags or manual runs. It uploads matching `pico_j2534.dll` and `vin_smoke_test.exe` artifacts, and on tag builds attaches `pico_j2534-win32.zip` and `pico_j2534-x64.zip` to the GitHub Release.
 
 ## VIN Smoke Test
 

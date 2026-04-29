@@ -36,7 +36,7 @@ cmake --build build/pico
 
 Flash `build/pico/pico_j2534.uf2` to the RP2350 board.
 
-GitHub Actions also builds the UF2 with the Pico SDK on Ubuntu. The workflow at `.github/workflows/build-pico-firmware.yml` uploads `pico_j2534.uf2` for pull requests and pushes, and attaches `pico_j2534-pico2-uf2.zip` to `v*` GitHub Releases.
+GitHub Actions also builds the UF2 with the Pico SDK on Ubuntu. The workflow at `.github/workflows/build-pico-firmware.yml` runs for `v*` tags or manual dispatch, uploads `pico_j2534.uf2`, and attaches `pico_j2534-pico2-uf2.zip` to tag-backed GitHub Releases.
 
 ## USB
 
