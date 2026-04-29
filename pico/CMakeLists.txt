@@ -8,6 +8,10 @@ if(NOT PICO_SDK_PATH)
     message(FATAL_ERROR "Set PICO_SDK_PATH to the Raspberry Pi Pico SDK")
 endif()
 
+if(NOT DEFINED PICO_BOARD)
+    set(PICO_BOARD pico2 CACHE STRING "PICO target board")
+endif()
+
 include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
 project(pico_j2534_firmware C CXX ASM)

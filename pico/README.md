@@ -40,4 +40,4 @@ GitHub Actions also builds the UF2 with the Pico SDK on Ubuntu. The workflow at 
 
 ## USB
 
-The firmware enumerates as vendor-specific VID `1209`, PID `2534` and publishes a Microsoft OS 2.0 descriptor with compatible ID `WINUSB`. Windows 10/11 should bind the inbox WinUSB driver automatically and create DeviceInterfaceGUID `{A9F78E2A-39A0-4A36-A6DF-6D80C96F54E1}` for the DLL.
+The firmware enumerates as composite VID `1209`, PID `2534` with an unused CDC interface plus a vendor-specific J2534 interface. The CDC interface helps Windows complete inbox-driver enumeration without an INF, while the J2534 interface publishes a Microsoft OS 2.0 descriptor with compatible ID `WINUSB`. Windows 10/11 should bind the inbox WinUSB driver automatically and create DeviceInterfaceGUID `{A9F78E2A-39A0-4A36-A6DF-6D80C96F54E1}` for the DLL.

@@ -1,5 +1,6 @@
 #include "winusb_transport_win.h"
 
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -16,6 +17,12 @@ constexpr GUID kPicoJ2534InterfaceGuid = {
 };
 
 constexpr uint8_t kInvalidPipe = 0;
+
+std::string windowsError(const char* prefix, DWORD error) {
+    char buffer[160]{};
+    std::snprintf(buffer, sizeof(buffer), "%s (GetLastError=%lu)", prefix, static_cast<unsigned long>(error));
+    return buffer;
+}
 
 }
 
@@ -58,7 +65,7 @@ bool WinUsbTransport::open() {
                                     FILE_SHARE_READ | FILE_SHARE_WRITE,
                                     nullptr,
                                     OPEN_EXISTING,
-                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+                                    FILE_ATTRIBUTE_NORMAL,
                                     nullptr);
         if (device == INVALID_HANDLE_VALUE) {
             continue;
@@ -186,7 +193,7 @@ bool WinUsbTransport::writePacketUnlocked(const picoj_packet_t& packet, unsigned
                           &transferred,
                           nullptr) ||
         transferred != sizeof(packet)) {
-        setError("WinUSB bulk write failed");
+        setError(windowsError("WinUSB bulk write failed", GetLastError()));
         return false;
     }
     return true;
@@ -204,7 +211,7 @@ bool WinUsbTransport::readPacketUnlocked(picoj_packet_t& packet, unsigned timeou
                          &transferred,
                          nullptr) ||
         transferred != sizeof(packet)) {
-        setError("WinUSB bulk read failed");
+        setError(windowsError("WinUSB bulk read failed", GetLastError()));
         return false;
     }
 

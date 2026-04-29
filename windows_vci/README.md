@@ -2,7 +2,7 @@
 
 This folder contains a Windows J2534-1 PassThru DLL for DTS Monaco and other J2534 clients.
 
-The DLL talks to the RP2350 board with WinUSB bulk endpoints. The firmware exposes Microsoft OS 2.0 descriptors so Windows 10/11 can bind the inbox WinUSB driver automatically after first plug-in. The DLL supports one CAN channel and exposes `CAN` and `ISO15765`.
+The DLL talks to the RP2350 board with WinUSB bulk endpoints. The firmware exposes a composite USB device with an unused CDC interface plus Microsoft OS 2.0 descriptors so Windows 10/11 can bind the inbox WinUSB driver automatically after first plug-in, without a custom INF. The DLL supports one CAN channel and exposes `CAN` and `ISO15765`.
 
 ## Build
 
