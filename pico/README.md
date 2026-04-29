@@ -36,6 +36,8 @@ cmake --build build/pico
 
 Flash `build/pico/pico_j2534.uf2` to the RP2350 board.
 
+GitHub Actions also builds the UF2 with the Pico SDK on Ubuntu. The workflow at `.github/workflows/build-pico-firmware.yml` uploads `pico_j2534.uf2` for pull requests and pushes, and attaches `pico_j2534-pico2-uf2.zip` to `v*` GitHub Releases.
+
 ## USB
 
 The firmware enumerates as vendor-specific VID `1209`, PID `2534` and publishes a Microsoft OS 2.0 descriptor with compatible ID `WINUSB`. Windows 10/11 should bind the inbox WinUSB driver automatically and create DeviceInterfaceGUID `{A9F78E2A-39A0-4A36-A6DF-6D80C96F54E1}` for the DLL.

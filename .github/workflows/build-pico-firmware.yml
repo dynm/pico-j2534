@@ -1,0 +1,68 @@
+name: Build Pico Firmware UF2
+
+on:
+  push:
+    tags:
+      - "v*"
+    paths:
+      - "pico/**"
+      - ".github/workflows/build-pico-firmware.yml"
+  pull_request:
+    paths:
+      - "pico/**"
+      - ".github/workflows/build-pico-firmware.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build pico2 UF2
+    runs-on: ubuntu-latest
+
+    env:
+      PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Checkout Pico SDK
+        uses: actions/checkout@v4
+        with:
+          repository: raspberrypi/pico-sdk
+          path: pico-sdk
+          submodules: recursive
+
+      - name: Configure
+        run: cmake -S pico -B build/pico -G Ninja -DPICO_BOARD=pico2
+
+      - name: Build
+        run: cmake --build build/pico
+
+      - name: Package UF2
+        run: |
+          mkdir -p build/package/pico_j2534-pico2
+          cp build/pico/pico_j2534.uf2 build/package/pico_j2534-pico2/
+          cd build/package
+          zip -r pico_j2534-pico2-uf2.zip pico_j2534-pico2
+
+      - name: Upload UF2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico_j2534-pico2-uf2
+          path: |
+            build/pico/pico_j2534.uf2
+            build/package/pico_j2534-pico2-uf2.zip
+
+      - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/package/pico_j2534-pico2-uf2.zip

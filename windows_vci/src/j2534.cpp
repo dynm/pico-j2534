@@ -23,6 +23,8 @@ struct ChannelState {
     unsigned long protocol = CAN;
     unsigned long flags = 0;
     unsigned long baudrate = 500000;
+    bool flowControlEnabled = false;
+    uint32_t flowControlCanId = 0;
     IsoTpReassembler isoRx;
 };
 
@@ -91,6 +93,20 @@ long sendCan(const picoj_can_frame_t& frame, unsigned timeoutMs) {
         }
     }
     return STATUS_NOERROR;
+}
+
+long sendIsoTpFlowControl(const picoj_can_frame_t& responseFrame) {
+    if (!g_channel.flowControlEnabled) {
+        return STATUS_NOERROR;
+    }
+
+    picoj_can_frame_t frame{};
+    frame.can_id = g_channel.flowControlCanId;
+    frame.flags = responseFrame.flags & PICOJ_CAN_EXTENDED;
+    frame.dlc = 8;
+    frame.data[0] = 0x30; // Continue To Send, block size 0, STmin 0.
+
+    return sendCan(frame, kDefaultTimeoutMs);
 }
 
 bool decodeCanPacket(const picoj_packet_t& packet, picoj_can_frame_t& frame) {
@@ -239,6 +255,13 @@ extern "C" long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG* p
         }
 
         if (g_channel.protocol == ISO15765) {
+            if (frame.dlc >= 2 && (frame.data[0] >> 4) == 0x1) {
+                status = sendIsoTpFlowControl(frame);
+                if (status != STATUS_NOERROR) {
+                    return status;
+                }
+            }
+
             IsoTpFrame iso{};
             if (!g_channel.isoRx.accept(frame, iso)) {
                 continue;
@@ -330,7 +353,7 @@ extern "C" long WINAPI PassThruStopPeriodicMsg(unsigned long, unsigned long) {
     return ERR_NOT_SUPPORTED;
 }
 
-extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID, unsigned long FilterType, PASSTHRU_MSG*, PASSTHRU_MSG*, PASSTHRU_MSG*, unsigned long* pFilterID) {
+extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID, unsigned long FilterType, PASSTHRU_MSG*, PASSTHRU_MSG*, PASSTHRU_MSG* pFlowControlMsg, unsigned long* pFilterID) {
     if (!pFilterID) {
         setLastError("Null filter id pointer");
         return ERR_NULL_PARAMETER;
@@ -344,13 +367,30 @@ extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID, unsigned 
         setLastError("Only pass and flow-control filters are accepted");
         return ERR_NOT_SUPPORTED;
     }
+    if (FilterType == FLOW_CONTROL_FILTER) {
+        if (!pFlowControlMsg) {
+            setLastError("Null flow-control message");
+            return ERR_NULL_PARAMETER;
+        }
+        if (pFlowControlMsg->DataSize < 4) {
+            setLastError("Invalid flow-control message");
+            return ERR_INVALID_MSG;
+        }
+        g_channel.flowControlEnabled = true;
+        g_channel.flowControlCanId = readCanId(*pFlowControlMsg);
+    }
     *pFilterID = 1;
     return STATUS_NOERROR;
 }
 
 extern "C" long WINAPI PassThruStopMsgFilter(unsigned long ChannelID, unsigned long) {
     std::lock_guard<std::mutex> lock(g_lock);
-    return ensureChannel(ChannelID);
+    long status = ensureChannel(ChannelID);
+    if (status == STATUS_NOERROR) {
+        g_channel.flowControlEnabled = false;
+        g_channel.flowControlCanId = 0;
+    }
+    return status;
 }
 
 extern "C" long WINAPI PassThruSetProgrammingVoltage(unsigned long DeviceID, unsigned long, unsigned long) {
