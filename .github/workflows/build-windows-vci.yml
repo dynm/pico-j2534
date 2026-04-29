@@ -2,6 +2,8 @@ name: Build Windows VCI DLL
 
 on:
   push:
+    branches:
+      - "main"
     tags:
       - "v*"
     paths:

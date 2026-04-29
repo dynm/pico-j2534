@@ -2,6 +2,8 @@ name: Build Pico Firmware UF2
 
 on:
   push:
+    branches:
+      - "main"
     tags:
       - "v*"
     paths:
