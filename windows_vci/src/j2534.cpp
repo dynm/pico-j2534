@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -39,6 +41,42 @@ void setLastError(const char* text) {
 
 void setLastError(const std::string& text) {
     g_lastError = text;
+}
+
+void logUnsupported(const char* function, const char* format, ...) {
+    char details[512]{};
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(details, sizeof(details), format, args);
+    va_end(args);
+
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+
+    char tempPath[MAX_PATH]{};
+    DWORD tempLen = GetTempPathA(static_cast<DWORD>(sizeof(tempPath)), tempPath);
+    std::string path = (tempLen > 0 && tempLen < sizeof(tempPath)) ? tempPath : ".\\";
+    path += "pico_j2534.log";
+
+    FILE* file = nullptr;
+    if (fopen_s(&file, path.c_str(), "a") == 0 && file) {
+        std::fprintf(file,
+                     "%04u-%02u-%02u %02u:%02u:%02u.%03u %s: %s\n",
+                     now.wYear,
+                     now.wMonth,
+                     now.wDay,
+                     now.wHour,
+                     now.wMinute,
+                     now.wSecond,
+                     now.wMilliseconds,
+                     function,
+                     details);
+        std::fclose(file);
+    }
+
+    char debugLine[640]{};
+    std::snprintf(debugLine, sizeof(debugLine), "pico_j2534 %s: %s\n", function, details);
+    OutputDebugStringA(debugLine);
 }
 
 uint32_t readCanId(const PASSTHRU_MSG& msg) {
@@ -107,6 +145,25 @@ long sendIsoTpFlowControl(const picoj_can_frame_t& responseFrame) {
     frame.data[0] = 0x30; // Continue To Send, block size 0, STmin 0.
 
     return sendCan(frame, kDefaultTimeoutMs);
+}
+
+long setBitrate(unsigned long bitrate) {
+    picoj_bitrate_t request{bitrate};
+    picoj_packet_t response{};
+    if (!g_usb.transact(PICOJ_CMD_SET_BITRATE, &request, sizeof(request), response, kDefaultTimeoutMs)) {
+        setLastError(g_usb.lastError());
+        return ERR_FAILED;
+    }
+    if (response.cmd == PICOJ_CMD_STATUS && response.len >= sizeof(picoj_status_t)) {
+        picoj_status_t status{};
+        std::memcpy(&status, response.payload, sizeof(status));
+        if (status.code != 0) {
+            setLastError("Firmware rejected CAN bitrate");
+            return ERR_FAILED;
+        }
+    }
+    g_channel.baudrate = bitrate;
+    return STATUS_NOERROR;
 }
 
 bool decodeCanPacket(const picoj_packet_t& packet, picoj_can_frame_t& frame) {
@@ -178,6 +235,11 @@ extern "C" long WINAPI PassThruConnect(unsigned long DeviceID, unsigned long Pro
         return ERR_NULL_PARAMETER;
     }
     if (ProtocolID != CAN && ProtocolID != ISO15765) {
+        logUnsupported("PassThruConnect",
+                       "unsupported ProtocolID=0x%08lX Flags=0x%08lX Baudrate=%lu",
+                       ProtocolID,
+                       Flags,
+                       Baudrate);
         setLastError("Only CAN and ISO15765 are supported");
         return ERR_INVALID_PROTOCOL_ID;
     }
@@ -192,17 +254,15 @@ extern "C" long WINAPI PassThruConnect(unsigned long DeviceID, unsigned long Pro
         return ERR_CHANNEL_IN_USE;
     }
 
-    picoj_bitrate_t bitrate{Baudrate};
-    picoj_packet_t response{};
-    if (!g_usb.transact(PICOJ_CMD_SET_BITRATE, &bitrate, sizeof(bitrate), response, kDefaultTimeoutMs)) {
-        setLastError(g_usb.lastError());
-        return ERR_FAILED;
-    }
-
     g_channel.connected = true;
     g_channel.protocol = ProtocolID;
     g_channel.flags = Flags;
-    g_channel.baudrate = Baudrate;
+    long bitrateStatus = setBitrate(Baudrate);
+    if (bitrateStatus != STATUS_NOERROR) {
+        g_channel = ChannelState{};
+        return bitrateStatus;
+    }
+
     *pChannelID = kChannelId;
     return STATUS_NOERROR;
 }
@@ -343,12 +403,19 @@ extern "C" long WINAPI PassThruWriteMsgs(unsigned long ChannelID, PASSTHRU_MSG* 
     return STATUS_NOERROR;
 }
 
-extern "C" long WINAPI PassThruStartPeriodicMsg(unsigned long, PASSTHRU_MSG*, unsigned long*, unsigned long) {
+extern "C" long WINAPI PassThruStartPeriodicMsg(unsigned long ChannelID, PASSTHRU_MSG* pMsg, unsigned long* pMsgID, unsigned long TimeInterval) {
+    logUnsupported("PassThruStartPeriodicMsg",
+                   "ChannelID=%lu Msg=%p MsgID=%p TimeInterval=%lu",
+                   ChannelID,
+                   static_cast<void*>(pMsg),
+                   static_cast<void*>(pMsgID),
+                   TimeInterval);
     setLastError("Periodic messages are not implemented");
     return ERR_NOT_SUPPORTED;
 }
 
-extern "C" long WINAPI PassThruStopPeriodicMsg(unsigned long, unsigned long) {
+extern "C" long WINAPI PassThruStopPeriodicMsg(unsigned long ChannelID, unsigned long MsgID) {
+    logUnsupported("PassThruStopPeriodicMsg", "ChannelID=%lu MsgID=%lu", ChannelID, MsgID);
     setLastError("Periodic messages are not implemented");
     return ERR_NOT_SUPPORTED;
 }
@@ -364,6 +431,7 @@ extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID, unsigned 
         return status;
     }
     if (FilterType != PASS_FILTER && FilterType != FLOW_CONTROL_FILTER) {
+        logUnsupported("PassThruStartMsgFilter", "ChannelID=%lu unsupported FilterType=%lu", ChannelID, FilterType);
         setLastError("Only pass and flow-control filters are accepted");
         return ERR_NOT_SUPPORTED;
     }
@@ -393,12 +461,17 @@ extern "C" long WINAPI PassThruStopMsgFilter(unsigned long ChannelID, unsigned l
     return status;
 }
 
-extern "C" long WINAPI PassThruSetProgrammingVoltage(unsigned long DeviceID, unsigned long, unsigned long) {
+extern "C" long WINAPI PassThruSetProgrammingVoltage(unsigned long DeviceID, unsigned long PinNumber, unsigned long Voltage) {
     std::lock_guard<std::mutex> lock(g_lock);
     long status = ensureDevice(DeviceID);
     if (status != STATUS_NOERROR) {
         return status;
     }
+    logUnsupported("PassThruSetProgrammingVoltage",
+                   "DeviceID=%lu PinNumber=%lu Voltage=%lu",
+                   DeviceID,
+                   PinNumber,
+                   Voltage);
     setLastError("Programming voltage is not supported");
     return ERR_NOT_SUPPORTED;
 }
@@ -431,16 +504,97 @@ extern "C" long WINAPI PassThruGetLastError(char* pErrorDescription) {
     return STATUS_NOERROR;
 }
 
-extern "C" long WINAPI PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID, void*, void*) {
+extern "C" long WINAPI PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID, void* pInput, void* pOutput) {
     std::lock_guard<std::mutex> lock(g_lock);
     long status = ensureChannel(ChannelID);
     if (status != STATUS_NOERROR) {
         return status;
     }
+    if (IoctlID == GET_CONFIG) {
+        auto* list = static_cast<SCONFIG_LIST*>(pInput);
+        if (!list || !list->ConfigPtr) {
+            setLastError("Null GET_CONFIG input");
+            return ERR_NULL_PARAMETER;
+        }
+        for (unsigned long i = 0; i < list->NumOfParams; ++i) {
+            SCONFIG& config = list->ConfigPtr[i];
+            switch (config.Parameter) {
+            case DATA_RATE:
+                config.Value = g_channel.baudrate;
+                break;
+            case LOOPBACK:
+                config.Value = 0;
+                break;
+            case ISO15765_BS:
+            case ISO15765_STMIN:
+            case ISO15765_WFT_MAX:
+                config.Value = 0;
+                break;
+            case J1962_PINS:
+                config.Value = 0x060E; // CAN-H pin 6, CAN-L pin 14.
+                break;
+            default:
+                logUnsupported("PassThruIoctl(GET_CONFIG)",
+                               "ChannelID=%lu unsupported Parameter=0x%08lX",
+                               ChannelID,
+                               config.Parameter);
+                config.Value = 0;
+                break;
+            }
+        }
+        return STATUS_NOERROR;
+    }
+    if (IoctlID == SET_CONFIG) {
+        auto* list = static_cast<SCONFIG_LIST*>(pInput);
+        if (!list || !list->ConfigPtr) {
+            setLastError("Null SET_CONFIG input");
+            return ERR_NULL_PARAMETER;
+        }
+        for (unsigned long i = 0; i < list->NumOfParams; ++i) {
+            const SCONFIG& config = list->ConfigPtr[i];
+            switch (config.Parameter) {
+            case DATA_RATE: {
+                status = setBitrate(config.Value);
+                if (status != STATUS_NOERROR) {
+                    return status;
+                }
+                break;
+            }
+            case LOOPBACK:
+            case ISO15765_BS:
+            case ISO15765_STMIN:
+            case ISO15765_WFT_MAX:
+            case J1962_PINS:
+                break;
+            default:
+                logUnsupported("PassThruIoctl(SET_CONFIG)",
+                               "ChannelID=%lu ignored Parameter=0x%08lX Value=0x%08lX",
+                               ChannelID,
+                               config.Parameter,
+                               config.Value);
+                break;
+            }
+        }
+        return STATUS_NOERROR;
+    }
+    if (IoctlID == READ_VBATT || IoctlID == READ_PROG_VOLTAGE) {
+        if (!pOutput) {
+            setLastError("Null voltage output");
+            return ERR_NULL_PARAMETER;
+        }
+        *static_cast<unsigned long*>(pOutput) = 12000;
+        return STATUS_NOERROR;
+    }
     if (IoctlID == CLEAR_RX_BUFFER || IoctlID == CLEAR_TX_BUFFER || IoctlID == CLEAR_MSG_FILTERS || IoctlID == CLEAR_PERIODIC_MSGS) {
         g_channel.isoRx.reset();
         return STATUS_NOERROR;
     }
+    logUnsupported("PassThruIoctl",
+                   "ChannelID=%lu unsupported IoctlID=0x%08lX Input=%p Output=%p",
+                   ChannelID,
+                   IoctlID,
+                   pInput,
+                   pOutput);
     setLastError("Ioctl is not implemented");
     return ERR_INVALID_IOCTL_ID;
 }
