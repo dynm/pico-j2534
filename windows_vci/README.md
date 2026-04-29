@@ -13,7 +13,7 @@ cmake -S windows_vci -B build/windows_vci -A Win32
 cmake --build build/windows_vci --config Release
 ```
 
-Many DTS Monaco installations are 32-bit, so build `Win32` first. If your Monaco install is 64-bit, build with `-A x64` and register the 64-bit DLL path.
+DTS 9 uses the 32-bit J2534/PassThru path through Softing's D-PDU bridge. Build and register the `Win32` DLL for DTS 9 even on 64-bit Windows. Only use the `x64` build for a confirmed 64-bit J2534 client.
 
 You can also build the DLL with GitHub Actions. The workflow at `.github/workflows/build-windows-vci.yml` builds both `Win32` and `x64` on `windows-latest` for `v*` tags or manual runs. It uploads matching `pico_j2534.dll` and `vin_smoke_test.exe` artifacts, and on tag builds attaches `pico_j2534-win32.zip` and `pico_j2534-x64.zip` to the GitHub Release.
 
@@ -30,16 +30,16 @@ The `vin_smoke_test` tool dynamically loads `pico_j2534.dll` and can run in two 
 
 ## Register for DTS Monaco
 
-1. Build `pico_j2534.dll`.
+1. Build or download the `Win32` `pico_j2534.dll`.
 2. Copy `register_pico_j2534.reg.in` to `register_pico_j2534.reg`.
-3. Replace `@DLL_PATH@` with the absolute path to the built DLL, escaping backslashes, for example `C:\\VCI\\pico_j2534.dll`.
+3. Replace `@DLL_PATH@` with the absolute path to the 32-bit DLL, escaping backslashes, for example `C:\\VCI\\pico_j2534.dll`.
 4. Import the file from an elevated prompt:
 
 ```powershell
 reg import windows_vci\register_pico_j2534.reg
 ```
 
-The template writes both native and `WOW6432Node` J2534 registry keys because Monaco is often a 32-bit process.
+The template writes both native and `WOW6432Node` J2534 registry keys. For DTS 9, both entries should point to the same 32-bit DLL so the Softing D-PDU PassThru bridge cannot accidentally load an x64 DLL.
 
 ## Current Scope
 
