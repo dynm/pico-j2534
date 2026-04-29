@@ -43,7 +43,7 @@ void setLastError(const std::string& text) {
     g_lastError = text;
 }
 
-void logUnsupported(const char* function, const char* format, ...) {
+void logEvent(const char* function, const char* format, ...) {
     char details[512]{};
     va_list args;
     va_start(args, format);
@@ -77,6 +77,15 @@ void logUnsupported(const char* function, const char* format, ...) {
     char debugLine[640]{};
     std::snprintf(debugLine, sizeof(debugLine), "pico_j2534 %s: %s\n", function, details);
     OutputDebugStringA(debugLine);
+}
+
+void logUnsupported(const char* function, const char* format, ...) {
+    char details[512]{};
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(details, sizeof(details), format, args);
+    va_end(args);
+    logEvent(function, "unsupported: %s", details);
 }
 
 uint32_t readCanId(const PASSTHRU_MSG& msg) {
@@ -190,6 +199,7 @@ void fillCanMessage(PASSTHRU_MSG& msg, unsigned long protocol, const picoj_can_f
 } // namespace
 
 extern "C" long WINAPI PassThruOpen(void*, unsigned long* pDeviceID) {
+    logEvent("PassThruOpen", "DeviceIDOut=%p", static_cast<void*>(pDeviceID));
     if (!pDeviceID) {
         setLastError("Null device id pointer");
         return ERR_NULL_PARAMETER;
@@ -203,22 +213,26 @@ extern "C" long WINAPI PassThruOpen(void*, unsigned long* pDeviceID) {
 
     if (!g_usb.open()) {
         setLastError(g_usb.lastError());
+        logEvent("PassThruOpen", "failed to open USB: %s", g_lastError.c_str());
         return ERR_DEVICE_NOT_CONNECTED;
     }
 
     picoj_packet_t response{};
     if (!g_usb.transact(PICOJ_CMD_HELLO, nullptr, 0, response, kDefaultTimeoutMs)) {
         setLastError(g_usb.lastError());
+        logEvent("PassThruOpen", "HELLO failed: %s", g_lastError.c_str());
         g_usb.close();
         return ERR_DEVICE_NOT_CONNECTED;
     }
 
     *pDeviceID = kDeviceId;
     setLastError("No error");
+    logEvent("PassThruOpen", "ok DeviceID=%lu", *pDeviceID);
     return STATUS_NOERROR;
 }
 
 extern "C" long WINAPI PassThruClose(unsigned long DeviceID) {
+    logEvent("PassThruClose", "DeviceID=%lu", DeviceID);
     std::lock_guard<std::mutex> lock(g_lock);
     long status = ensureDevice(DeviceID);
     if (status != STATUS_NOERROR) {
@@ -230,6 +244,13 @@ extern "C" long WINAPI PassThruClose(unsigned long DeviceID) {
 }
 
 extern "C" long WINAPI PassThruConnect(unsigned long DeviceID, unsigned long ProtocolID, unsigned long Flags, unsigned long Baudrate, unsigned long* pChannelID) {
+    logEvent("PassThruConnect",
+             "DeviceID=%lu ProtocolID=0x%08lX Flags=0x%08lX Baudrate=%lu ChannelIDOut=%p",
+             DeviceID,
+             ProtocolID,
+             Flags,
+             Baudrate,
+             static_cast<void*>(pChannelID));
     if (!pChannelID) {
         setLastError("Null channel id pointer");
         return ERR_NULL_PARAMETER;
@@ -264,10 +285,12 @@ extern "C" long WINAPI PassThruConnect(unsigned long DeviceID, unsigned long Pro
     }
 
     *pChannelID = kChannelId;
+    logEvent("PassThruConnect", "ok ChannelID=%lu", *pChannelID);
     return STATUS_NOERROR;
 }
 
 extern "C" long WINAPI PassThruDisconnect(unsigned long ChannelID) {
+    logEvent("PassThruDisconnect", "ChannelID=%lu", ChannelID);
     std::lock_guard<std::mutex> lock(g_lock);
     long status = ensureChannel(ChannelID);
     if (status != STATUS_NOERROR) {
@@ -278,6 +301,13 @@ extern "C" long WINAPI PassThruDisconnect(unsigned long ChannelID) {
 }
 
 extern "C" long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG* pMsg, unsigned long* pNumMsgs, unsigned long Timeout) {
+    logEvent("PassThruReadMsgs",
+             "ChannelID=%lu Msg=%p NumMsgs=%p Requested=%lu Timeout=%lu",
+             ChannelID,
+             static_cast<void*>(pMsg),
+             static_cast<void*>(pNumMsgs),
+             pNumMsgs ? *pNumMsgs : 0,
+             Timeout);
     if (!pMsg || !pNumMsgs) {
         setLastError("Null read message argument");
         return ERR_NULL_PARAMETER;
@@ -348,6 +378,13 @@ extern "C" long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG* p
 }
 
 extern "C" long WINAPI PassThruWriteMsgs(unsigned long ChannelID, PASSTHRU_MSG* pMsg, unsigned long* pNumMsgs, unsigned long Timeout) {
+    logEvent("PassThruWriteMsgs",
+             "ChannelID=%lu Msg=%p NumMsgs=%p Requested=%lu Timeout=%lu",
+             ChannelID,
+             static_cast<void*>(pMsg),
+             static_cast<void*>(pNumMsgs),
+             pNumMsgs ? *pNumMsgs : 0,
+             Timeout);
     if (!pMsg || !pNumMsgs) {
         setLastError("Null write message argument");
         return ERR_NULL_PARAMETER;
@@ -421,6 +458,12 @@ extern "C" long WINAPI PassThruStopPeriodicMsg(unsigned long ChannelID, unsigned
 }
 
 extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID, unsigned long FilterType, PASSTHRU_MSG*, PASSTHRU_MSG*, PASSTHRU_MSG* pFlowControlMsg, unsigned long* pFilterID) {
+    logEvent("PassThruStartMsgFilter",
+             "ChannelID=%lu FilterType=%lu FlowControlMsg=%p FilterIDOut=%p",
+             ChannelID,
+             FilterType,
+             static_cast<void*>(pFlowControlMsg),
+             static_cast<void*>(pFilterID));
     if (!pFilterID) {
         setLastError("Null filter id pointer");
         return ERR_NULL_PARAMETER;
@@ -452,6 +495,7 @@ extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID, unsigned 
 }
 
 extern "C" long WINAPI PassThruStopMsgFilter(unsigned long ChannelID, unsigned long) {
+    logEvent("PassThruStopMsgFilter", "ChannelID=%lu", ChannelID);
     std::lock_guard<std::mutex> lock(g_lock);
     long status = ensureChannel(ChannelID);
     if (status == STATUS_NOERROR) {
@@ -462,6 +506,11 @@ extern "C" long WINAPI PassThruStopMsgFilter(unsigned long ChannelID, unsigned l
 }
 
 extern "C" long WINAPI PassThruSetProgrammingVoltage(unsigned long DeviceID, unsigned long PinNumber, unsigned long Voltage) {
+    logEvent("PassThruSetProgrammingVoltage",
+             "DeviceID=%lu PinNumber=%lu Voltage=%lu",
+             DeviceID,
+             PinNumber,
+             Voltage);
     std::lock_guard<std::mutex> lock(g_lock);
     long status = ensureDevice(DeviceID);
     if (status != STATUS_NOERROR) {
@@ -477,6 +526,12 @@ extern "C" long WINAPI PassThruSetProgrammingVoltage(unsigned long DeviceID, uns
 }
 
 extern "C" long WINAPI PassThruReadVersion(unsigned long DeviceID, char* pFirmwareVersion, char* pDllVersion, char* pApiVersion) {
+    logEvent("PassThruReadVersion",
+             "DeviceID=%lu FirmwareOut=%p DllOut=%p ApiOut=%p",
+             DeviceID,
+             static_cast<void*>(pFirmwareVersion),
+             static_cast<void*>(pDllVersion),
+             static_cast<void*>(pApiVersion));
     std::lock_guard<std::mutex> lock(g_lock);
     long status = ensureDevice(DeviceID);
     if (status != STATUS_NOERROR) {
@@ -495,6 +550,7 @@ extern "C" long WINAPI PassThruReadVersion(unsigned long DeviceID, char* pFirmwa
 }
 
 extern "C" long WINAPI PassThruGetLastError(char* pErrorDescription) {
+    logEvent("PassThruGetLastError", "ErrorOut=%p LastError=%s", static_cast<void*>(pErrorDescription), g_lastError.c_str());
     if (!pErrorDescription) {
         return ERR_NULL_PARAMETER;
     }
@@ -505,6 +561,12 @@ extern "C" long WINAPI PassThruGetLastError(char* pErrorDescription) {
 }
 
 extern "C" long WINAPI PassThruIoctl(unsigned long ChannelID, unsigned long IoctlID, void* pInput, void* pOutput) {
+    logEvent("PassThruIoctl",
+             "ChannelID=%lu IoctlID=0x%08lX Input=%p Output=%p",
+             ChannelID,
+             IoctlID,
+             pInput,
+             pOutput);
     std::lock_guard<std::mutex> lock(g_lock);
     long status = ensureChannel(ChannelID);
     if (status != STATUS_NOERROR) {
