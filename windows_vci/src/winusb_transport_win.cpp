@@ -18,6 +18,7 @@ constexpr GUID kPicoJ2534InterfaceGuid = {
 };
 
 constexpr uint8_t kInvalidPipe = 0;
+constexpr size_t kMaxPendingPackets = 256;
 
 std::string windowsError(const char* prefix, DWORD error) {
     char buffer[160]{};
@@ -28,7 +29,12 @@ std::string windowsError(const char* prefix, DWORD error) {
 }
 
 WinUsbTransport::WinUsbTransport()
-    : deviceHandle_(INVALID_HANDLE_VALUE), winusbHandle_(nullptr), bulkIn_(kInvalidPipe), bulkOut_(kInvalidPipe), seq_(1) {}
+    : deviceHandle_(INVALID_HANDLE_VALUE),
+      winusbHandle_(nullptr),
+      bulkIn_(kInvalidPipe),
+      bulkOut_(kInvalidPipe),
+      seq_(1),
+      lastErrorWasTimeout_(false) {}
 
 WinUsbTransport::~WinUsbTransport() {
     close();
@@ -37,6 +43,7 @@ WinUsbTransport::~WinUsbTransport() {
 bool WinUsbTransport::open() {
     std::lock_guard<std::mutex> lock(ioMutex_);
     closeUnlocked();
+    pendingPackets_.clear();
 
     std::string openError = "Pico J2534 WinUSB interface not found";
     auto openByGuid = [this, &openError](const GUID& guid) {
@@ -136,6 +143,7 @@ void WinUsbTransport::close() {
 }
 
 void WinUsbTransport::closeUnlocked() {
+    pendingPackets_.clear();
     if (winusbHandle_) {
         WinUsb_Free(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_));
         winusbHandle_ = nullptr;
@@ -192,15 +200,27 @@ bool WinUsbTransport::transact(uint8_t cmd, const void* outData, uint8_t outLen,
         if (response.magic == PICOJ_PACKET_MAGIC && response.seq == request.seq) {
             return true;
         }
+        if (response.cmd == PICOJ_CMD_CAN_RX) {
+            if (pendingPackets_.size() >= kMaxPendingPackets) {
+                pendingPackets_.pop_front();
+            }
+            pendingPackets_.push_back(response);
+        }
     }
 }
 
 bool WinUsbTransport::readPacket(picoj_packet_t& packet, unsigned timeoutMs) {
     std::lock_guard<std::mutex> lock(ioMutex_);
+    if (!pendingPackets_.empty()) {
+        packet = pendingPackets_.front();
+        pendingPackets_.pop_front();
+        return true;
+    }
     return readPacketUnlocked(packet, timeoutMs);
 }
 
 bool WinUsbTransport::writePacketUnlocked(const picoj_packet_t& packet, unsigned timeoutMs) {
+    lastErrorWasTimeout_ = false;
     ULONG timeout = timeoutMs;
     if (!WinUsb_SetPipePolicy(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_),
                               bulkOut_,
@@ -228,6 +248,7 @@ bool WinUsbTransport::writePacketUnlocked(const picoj_packet_t& packet, unsigned
 }
 
 bool WinUsbTransport::readPacketUnlocked(picoj_packet_t& packet, unsigned timeoutMs) {
+    lastErrorWasTimeout_ = false;
     std::memset(&packet, 0, sizeof(packet));
     auto* out = reinterpret_cast<uint8_t*>(&packet);
     ULONG total = 0;
@@ -240,6 +261,7 @@ bool WinUsbTransport::readPacketUnlocked(picoj_packet_t& packet, unsigned timeou
             std::snprintf(buffer, sizeof(buffer), "WinUSB bulk read timed out after %lu of %zu bytes",
                           static_cast<unsigned long>(total), sizeof(packet));
             setError(buffer);
+            lastErrorWasTimeout_ = true;
             return false;
         }
 
@@ -265,6 +287,8 @@ bool WinUsbTransport::readPacketUnlocked(picoj_packet_t& packet, unsigned timeou
             setError(windowsError("WinUSB bulk read failed", error));
             if (error != ERROR_SEM_TIMEOUT && error != ERROR_TIMEOUT) {
                 closeUnlocked();
+            } else {
+                lastErrorWasTimeout_ = true;
             }
             return false;
         }

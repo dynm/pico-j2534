@@ -19,14 +19,26 @@ namespace {
 constexpr unsigned long kDeviceId = 1;
 constexpr unsigned long kChannelId = 1;
 constexpr unsigned kDefaultTimeoutMs = 1000;
+constexpr size_t kMaxFilters = 8;
+
+struct MessageFilter {
+    bool active = false;
+    unsigned long id = 0;
+    unsigned long type = 0;
+    uint32_t maskCanId = 0;
+    uint32_t patternCanId = 0;
+    bool patternExtended = false;
+    bool flowControl = false;
+    uint32_t flowControlCanId = 0;
+};
 
 struct ChannelState {
     bool connected = false;
     unsigned long protocol = CAN;
     unsigned long flags = 0;
     unsigned long baudrate = 500000;
-    bool flowControlEnabled = false;
-    uint32_t flowControlCanId = 0;
+    unsigned long nextFilterId = 1;
+    std::array<MessageFilter, kMaxFilters> filters{};
     IsoTpReassembler isoRx;
 };
 
@@ -163,6 +175,30 @@ long ensureChannel(unsigned long channelId) {
     return STATUS_NOERROR;
 }
 
+bool frameMatchesFilter(const picoj_can_frame_t& frame, const MessageFilter& filter) {
+    if (!filter.active) {
+        return false;
+    }
+    if (((frame.can_id ^ filter.patternCanId) & filter.maskCanId) != 0) {
+        return false;
+    }
+    return ((frame.flags & PICOJ_CAN_EXTENDED) != 0) == filter.patternExtended;
+}
+
+bool framePassesFilters(const picoj_can_frame_t& frame) {
+    bool hasPassFilter = false;
+    for (const auto& filter : g_channel.filters) {
+        if (!filter.active || (filter.type != PASS_FILTER && filter.type != FLOW_CONTROL_FILTER)) {
+            continue;
+        }
+        hasPassFilter = true;
+        if (frameMatchesFilter(frame, filter)) {
+            return true;
+        }
+    }
+    return !hasPassFilter;
+}
+
 long sendCan(const picoj_can_frame_t& frame, unsigned timeoutMs) {
     picoj_packet_t response{};
     if (!g_usb.transact(PICOJ_CMD_CAN_TX, &frame, sizeof(frame), response, timeoutMs ? timeoutMs : kDefaultTimeoutMs)) {
@@ -185,17 +221,20 @@ long sendCan(const picoj_can_frame_t& frame, unsigned timeoutMs) {
 }
 
 long sendIsoTpFlowControl(const picoj_can_frame_t& responseFrame) {
-    if (!g_channel.flowControlEnabled) {
-        return STATUS_NOERROR;
+    for (const auto& filter : g_channel.filters) {
+        if (!filter.flowControl || !frameMatchesFilter(responseFrame, filter)) {
+            continue;
+        }
+
+        picoj_can_frame_t frame{};
+        frame.can_id = filter.flowControlCanId;
+        frame.flags = responseFrame.flags & PICOJ_CAN_EXTENDED;
+        frame.dlc = 8;
+        frame.data[0] = 0x30; // Continue To Send, block size 0, STmin 0.
+
+        return sendCan(frame, kDefaultTimeoutMs);
     }
-
-    picoj_can_frame_t frame{};
-    frame.can_id = g_channel.flowControlCanId;
-    frame.flags = responseFrame.flags & PICOJ_CAN_EXTENDED;
-    frame.dlc = 8;
-    frame.data[0] = 0x30; // Continue To Send, block size 0, STmin 0.
-
-    return sendCan(frame, kDefaultTimeoutMs);
+    return STATUS_NOERROR;
 }
 
 long setBitrate(unsigned long bitrate) {
@@ -407,16 +446,22 @@ extern "C" long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG* p
         picoj_packet_t packet{};
         const unsigned readTimeout = nonBlocking ? 1u : Timeout - elapsed;
         if (!g_usb.readPacket(packet, readTimeout)) {
-            setLastError(g_usb.lastError());
             if (!g_usb.isOpen()) {
+                setLastError(g_usb.lastError());
                 g_channel = ChannelState{};
                 return *pNumMsgs ? STATUS_NOERROR : ERR_DEVICE_NOT_CONNECTED;
+            }
+            if (!g_usb.lastErrorWasTimeout()) {
+                setLastError(g_usb.lastError());
             }
             return *pNumMsgs ? STATUS_NOERROR : ERR_BUFFER_EMPTY;
         }
 
         picoj_can_frame_t frame{};
         if (!decodeCanPacket(packet, frame)) {
+            continue;
+        }
+        if (!framePassesFilters(frame)) {
             continue;
         }
 
@@ -533,11 +578,18 @@ extern "C" long WINAPI PassThruStopPeriodicMsg(unsigned long ChannelID, unsigned
     return ERR_NOT_SUPPORTED;
 }
 
-extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID, unsigned long FilterType, PASSTHRU_MSG*, PASSTHRU_MSG*, PASSTHRU_MSG* pFlowControlMsg, unsigned long* pFilterID) {
+extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID,
+                                               unsigned long FilterType,
+                                               PASSTHRU_MSG* pMaskMsg,
+                                               PASSTHRU_MSG* pPatternMsg,
+                                               PASSTHRU_MSG* pFlowControlMsg,
+                                               unsigned long* pFilterID) {
     logEvent("PassThruStartMsgFilter",
-             "ChannelID=%lu FilterType=%lu FlowControlMsg=%p FilterIDOut=%p",
+             "ChannelID=%lu FilterType=%lu MaskMsg=%p PatternMsg=%p FlowControlMsg=%p FilterIDOut=%p",
              ChannelID,
              FilterType,
+             static_cast<void*>(pMaskMsg),
+             static_cast<void*>(pPatternMsg),
              static_cast<void*>(pFlowControlMsg),
              static_cast<void*>(pFilterID));
     if (!pFilterID) {
@@ -554,6 +606,27 @@ extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID, unsigned 
         setLastError("Only pass and flow-control filters are accepted");
         return ERR_NOT_SUPPORTED;
     }
+    if (!pMaskMsg || !pPatternMsg || pMaskMsg->DataSize < 4 || pPatternMsg->DataSize < 4) {
+        setLastError("Invalid filter mask or pattern message");
+        return ERR_INVALID_MSG;
+    }
+
+    auto slot = std::find_if(g_channel.filters.begin(), g_channel.filters.end(), [](const MessageFilter& filter) {
+        return !filter.active;
+    });
+    if (slot == g_channel.filters.end()) {
+        setLastError("Message filter limit exceeded");
+        return ERR_EXCEEDED_LIMIT;
+    }
+
+    MessageFilter filter{};
+    filter.active = true;
+    filter.id = g_channel.nextFilterId++;
+    filter.type = FilterType;
+    filter.maskCanId = readCanId(*pMaskMsg);
+    filter.patternCanId = readCanId(*pPatternMsg);
+    filter.patternExtended = (pPatternMsg->TxFlags & CAN_29BIT_ID) != 0;
+
     if (FilterType == FLOW_CONTROL_FILTER) {
         if (!pFlowControlMsg) {
             setLastError("Null flow-control message");
@@ -563,22 +636,30 @@ extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID, unsigned 
             setLastError("Invalid flow-control message");
             return ERR_INVALID_MSG;
         }
-        g_channel.flowControlEnabled = true;
-        g_channel.flowControlCanId = readCanId(*pFlowControlMsg);
+        filter.flowControl = true;
+        filter.flowControlCanId = readCanId(*pFlowControlMsg);
     }
-    *pFilterID = 1;
+
+    *slot = filter;
+    *pFilterID = filter.id;
     return STATUS_NOERROR;
 }
 
-extern "C" long WINAPI PassThruStopMsgFilter(unsigned long ChannelID, unsigned long) {
-    logEvent("PassThruStopMsgFilter", "ChannelID=%lu", ChannelID);
+extern "C" long WINAPI PassThruStopMsgFilter(unsigned long ChannelID, unsigned long FilterID) {
+    logEvent("PassThruStopMsgFilter", "ChannelID=%lu FilterID=%lu", ChannelID, FilterID);
     std::lock_guard<std::mutex> lock(g_lock);
     long status = ensureChannel(ChannelID);
-    if (status == STATUS_NOERROR) {
-        g_channel.flowControlEnabled = false;
-        g_channel.flowControlCanId = 0;
+    if (status != STATUS_NOERROR) {
+        return status;
     }
-    return status;
+    for (auto& filter : g_channel.filters) {
+        if (filter.active && filter.id == FilterID) {
+            filter = MessageFilter{};
+            return STATUS_NOERROR;
+        }
+    }
+    setLastError("Invalid message filter id");
+    return ERR_INVALID_FILTER_ID;
 }
 
 extern "C" long WINAPI PassThruSetProgrammingVoltage(unsigned long DeviceID, unsigned long PinNumber, unsigned long Voltage) {

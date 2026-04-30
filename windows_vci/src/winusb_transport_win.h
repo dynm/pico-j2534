@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 
@@ -18,6 +19,7 @@ public:
     bool transact(uint8_t cmd, const void* outData, uint8_t outLen, picoj_packet_t& response, unsigned timeoutMs);
     bool readPacket(picoj_packet_t& packet, unsigned timeoutMs);
     const std::string& lastError() const { return lastError_; }
+    bool lastErrorWasTimeout() const { return lastErrorWasTimeout_; }
 
 private:
     void closeUnlocked();
@@ -31,5 +33,7 @@ private:
     uint8_t bulkOut_;
     uint8_t seq_;
     mutable std::mutex ioMutex_;
+    std::deque<picoj_packet_t> pendingPackets_;
     std::string lastError_;
+    bool lastErrorWasTimeout_;
 };
