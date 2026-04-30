@@ -261,8 +261,11 @@ bool WinUsbTransport::readPacketUnlocked(picoj_packet_t& packet, unsigned timeou
                              static_cast<ULONG>(sizeof(packet) - total),
                              &transferred,
                              nullptr)) {
-            setError(windowsError("WinUSB bulk read failed", GetLastError()));
-            closeUnlocked();
+            const DWORD error = GetLastError();
+            setError(windowsError("WinUSB bulk read failed", error));
+            if (error != ERROR_SEM_TIMEOUT && error != ERROR_TIMEOUT) {
+                closeUnlocked();
+            }
             return false;
         }
 
