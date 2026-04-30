@@ -24,6 +24,10 @@ add_executable(pico_j2534
 )
 
 target_include_directories(pico_j2534 PRIVATE include)
+set(PICOJ_MCP2515_OSC_HZ "" CACHE STRING "MCP2515 crystal frequency in Hz, usually 8000000 or 16000000")
+if(PICOJ_MCP2515_OSC_HZ)
+    target_compile_definitions(pico_j2534 PRIVATE PICOJ_MCP2515_OSC_HZ=${PICOJ_MCP2515_OSC_HZ})
+endif()
 target_link_libraries(pico_j2534 PRIVATE
     pico_stdlib
     hardware_spi

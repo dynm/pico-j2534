@@ -34,6 +34,13 @@ cmake -S pico -B build/pico -DPICO_BOARD=pico2
 cmake --build build/pico
 ```
 
+If your MCP2515 board has an 8 MHz crystal, configure the firmware with:
+
+```sh
+cmake -S pico -B build/pico -DPICO_BOARD=pico2 -DPICOJ_MCP2515_OSC_HZ=8000000
+cmake --build build/pico
+```
+
 Flash `build/pico/pico_j2534.uf2` to the RP2350 board.
 
 GitHub Actions also builds the UF2 with the Pico SDK on Ubuntu. The workflow at `.github/workflows/build-pico-firmware.yml` runs for `v*` tags or manual dispatch, uploads `pico_j2534.uf2`, and attaches `pico_j2534-pico2-uf2.zip` to tag-backed GitHub Releases.

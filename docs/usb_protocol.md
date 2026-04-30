@@ -19,5 +19,6 @@ Commands:
 - `CAN_TX`: host sends `picoj_can_frame_t`; firmware transmits the CAN frame.
 - `CAN_RX`: firmware sends unsolicited received CAN frames with sequence `0`.
 - `STATUS`: firmware response with `picoj_status_t`.
+- `CLEAR_RX`: host asks firmware to drop queued CAN receive frames and return `STATUS`.
 
 The firmware exposes Microsoft OS 2.0 descriptors with DeviceInterfaceGUID `{A9F78E2A-39A0-4A36-A6DF-6D80C96F54E1}`. The Windows DLL discovers that interface with SetupAPI and uses WinUSB bulk reads/writes.

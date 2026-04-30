@@ -14,10 +14,12 @@ namespace {
 
 constexpr unsigned long kObdRequestId = 0x7DF;
 constexpr unsigned long kObdResponseBase = 0x7E8;
-constexpr unsigned long kObdResponseMask = 0x7F8;
+constexpr unsigned long kObdPhysicalRequestBase = 0x7E0;
+constexpr unsigned long kObdExactMask = 0x7FF;
 constexpr unsigned long kCanBaudrate = 500000;
 constexpr unsigned long kReadTimeoutMs = 250;
-constexpr unsigned long kTotalReadTimeMs = 5000;
+constexpr unsigned long kFunctionalReadTimeMs = 5000;
+constexpr unsigned long kPhysicalReadTimeMs = 1500;
 
 using PassThruOpenFn = long(WINAPI*)(void*, unsigned long*);
 using PassThruCloseFn = long(WINAPI*)(unsigned long);
@@ -26,6 +28,7 @@ using PassThruDisconnectFn = long(WINAPI*)(unsigned long);
 using PassThruReadMsgsFn = long(WINAPI*)(unsigned long, PASSTHRU_MSG*, unsigned long*, unsigned long);
 using PassThruWriteMsgsFn = long(WINAPI*)(unsigned long, PASSTHRU_MSG*, unsigned long*, unsigned long);
 using PassThruStartMsgFilterFn = long(WINAPI*)(unsigned long, unsigned long, PASSTHRU_MSG*, PASSTHRU_MSG*, PASSTHRU_MSG*, unsigned long*);
+using PassThruIoctlFn = long(WINAPI*)(unsigned long, unsigned long, void*, void*);
 using PassThruGetLastErrorFn = long(WINAPI*)(char*);
 
 struct J2534Api {
@@ -37,6 +40,7 @@ struct J2534Api {
     PassThruReadMsgsFn PassThruReadMsgs = nullptr;
     PassThruWriteMsgsFn PassThruWriteMsgs = nullptr;
     PassThruStartMsgFilterFn PassThruStartMsgFilter = nullptr;
+    PassThruIoctlFn PassThruIoctl = nullptr;
     PassThruGetLastErrorFn PassThruGetLastError = nullptr;
 };
 
@@ -107,6 +111,7 @@ bool loadApi(const char* dllPath, J2534Api& api) {
     ok &= loadProc(api.module, "PassThruReadMsgs", api.PassThruReadMsgs);
     ok &= loadProc(api.module, "PassThruWriteMsgs", api.PassThruWriteMsgs);
     ok &= loadProc(api.module, "PassThruStartMsgFilter", api.PassThruStartMsgFilter);
+    ok &= loadProc(api.module, "PassThruIoctl", api.PassThruIoctl);
     ok &= loadProc(api.module, "PassThruGetLastError", api.PassThruGetLastError);
     return ok;
 }
@@ -134,21 +139,26 @@ void setPayload(PASSTHRU_MSG& msg, unsigned long canId, const std::vector<unsign
 }
 
 bool installVinFilter(const J2534Api& api, unsigned long channelId) {
-    PASSTHRU_MSG mask{};
-    PASSTHRU_MSG pattern{};
-    PASSTHRU_MSG flow{};
-    setPayload(mask, kObdResponseMask, {});
-    setPayload(pattern, kObdResponseBase, {});
-    setPayload(flow, 0x7E0, {});
+    bool installed = false;
+    for (unsigned long offset = 0; offset < 8; ++offset) {
+        PASSTHRU_MSG mask{};
+        PASSTHRU_MSG pattern{};
+        PASSTHRU_MSG flow{};
+        setPayload(mask, kObdExactMask, {});
+        setPayload(pattern, kObdResponseBase + offset, {});
+        setPayload(flow, kObdPhysicalRequestBase + offset, {});
 
-    unsigned long filterId = 0;
-    const long status = api.PassThruStartMsgFilter(channelId, FLOW_CONTROL_FILTER, &mask, &pattern, &flow, &filterId);
-    if (status != STATUS_NOERROR) {
-        std::cerr << "Warning: PassThruStartMsgFilter failed with 0x" << std::hex << status << std::dec
-                  << ": " << lastJ2534Error(api) << "\n";
-        return false;
+        unsigned long filterId = 0;
+        const long status = api.PassThruStartMsgFilter(channelId, FLOW_CONTROL_FILTER, &mask, &pattern, &flow, &filterId);
+        if (status != STATUS_NOERROR) {
+            std::cerr << "Warning: PassThruStartMsgFilter failed for 0x" << std::hex << (kObdResponseBase + offset)
+                      << " -> 0x" << (kObdPhysicalRequestBase + offset) << " with 0x" << status << std::dec
+                      << ": " << lastJ2534Error(api) << "\n";
+            continue;
+        }
+        installed = true;
     }
-    return true;
+    return installed;
 }
 
 std::string parseVinPayload(const PASSTHRU_MSG& msg) {
@@ -178,6 +188,46 @@ std::string parseVinPayload(const PASSTHRU_MSG& msg) {
     return vin.size() == 17 ? vin : std::string{};
 }
 
+void clearRxBuffer(const J2534Api& api, unsigned long channelId) {
+    const long status = api.PassThruIoctl(channelId, CLEAR_RX_BUFFER, nullptr, nullptr);
+    if (status != STATUS_NOERROR) {
+        std::cerr << "Warning: CLEAR_RX_BUFFER failed with 0x" << std::hex << status << std::dec
+                  << ": " << lastJ2534Error(api) << "\n";
+    }
+}
+
+std::string requestVin(const J2534Api& api, unsigned long channelId, unsigned long requestId, unsigned long totalReadTimeMs) {
+    clearRxBuffer(api, channelId);
+
+    PASSTHRU_MSG request{};
+    setPayload(request, requestId, {0x09, 0x02});
+    unsigned long requestCount = 1;
+    long status = api.PassThruWriteMsgs(channelId, &request, &requestCount, 1000);
+    if (status != STATUS_NOERROR || requestCount != 1) {
+        std::cerr << "PassThruWriteMsgs failed for request ID 0x" << std::hex << requestId << " with 0x" << status << std::dec
+                  << ": " << lastJ2534Error(api) << "\n";
+        return {};
+    }
+
+    const DWORD start = GetTickCount();
+    while (GetTickCount() - start < totalReadTimeMs) {
+        PASSTHRU_MSG response{};
+        unsigned long responseCount = 1;
+        status = api.PassThruReadMsgs(channelId, &response, &responseCount, kReadTimeoutMs);
+        if (status == STATUS_NOERROR && responseCount > 0) {
+            const std::string vin = parseVinPayload(response);
+            if (!vin.empty()) {
+                return vin;
+            }
+        } else if (status != ERR_BUFFER_EMPTY) {
+            std::cerr << "PassThruReadMsgs failed with 0x" << std::hex << status << std::dec << ": " << lastJ2534Error(api) << "\n";
+            return {};
+        }
+    }
+
+    return {};
+}
+
 bool readVin(const J2534Api& api) {
     unsigned long deviceId = 0;
     long status = api.PassThruOpen(nullptr, &deviceId);
@@ -196,34 +246,17 @@ bool readVin(const J2534Api& api) {
 
     installVinFilter(api, channelId);
 
-    PASSTHRU_MSG request{};
-    setPayload(request, kObdRequestId, {0x09, 0x02});
-    unsigned long requestCount = 1;
-    status = api.PassThruWriteMsgs(channelId, &request, &requestCount, 1000);
-    if (status != STATUS_NOERROR || requestCount != 1) {
-        std::cerr << "PassThruWriteMsgs failed with 0x" << std::hex << status << std::dec << ": " << lastJ2534Error(api) << "\n";
+    std::string vin = requestVin(api, channelId, kObdRequestId, kFunctionalReadTimeMs);
+    if (vin.empty()) {
+        for (unsigned long offset = 0; offset < 8 && vin.empty(); ++offset) {
+            vin = requestVin(api, channelId, kObdPhysicalRequestBase + offset, kPhysicalReadTimeMs);
+        }
+    }
+    if (!vin.empty()) {
+        std::cout << "VIN: " << vin << "\n";
         api.PassThruDisconnect(channelId);
         api.PassThruClose(deviceId);
-        return false;
-    }
-
-    const DWORD start = GetTickCount();
-    while (GetTickCount() - start < kTotalReadTimeMs) {
-        PASSTHRU_MSG response{};
-        unsigned long responseCount = 1;
-        status = api.PassThruReadMsgs(channelId, &response, &responseCount, kReadTimeoutMs);
-        if (status == STATUS_NOERROR && responseCount > 0) {
-            const std::string vin = parseVinPayload(response);
-            if (!vin.empty()) {
-                std::cout << "VIN: " << vin << "\n";
-                api.PassThruDisconnect(channelId);
-                api.PassThruClose(deviceId);
-                return true;
-            }
-        } else if (status != ERR_BUFFER_EMPTY) {
-            std::cerr << "PassThruReadMsgs failed with 0x" << std::hex << status << std::dec << ": " << lastJ2534Error(api) << "\n";
-            break;
-        }
+        return true;
     }
 
     std::cerr << "Timed out waiting for a VIN response\n";

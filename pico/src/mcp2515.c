@@ -32,10 +32,15 @@
 #define TXB2SIDH 0x51
 #define RXB0SIDH 0x61
 #define RXB1SIDH 0x71
+#define MCP_TX_TIMEOUT_US 10000u
 
 #define CANCTRL_ABORT_ALL 0x10
 #define TXB_TXREQ 0x08
-#define TXB_ERROR_FLAGS 0x70
+#define TXB_ABTF 0x40
+#define TXB_MLOA 0x20
+#define TXB_TXERR 0x10
+#define TXB_ERROR_FLAGS (TXB_ABTF | TXB_MLOA | TXB_TXERR)
+#define TXB_FATAL_FLAGS (TXB_ABTF | TXB_TXERR)
 
 static void cs_select(void) {
     gpio_put(PICOJ_CAN_PIN_CS, 0);
@@ -99,39 +104,39 @@ static bool set_cnf(uint32_t bitrate) {
 #if PICOJ_MCP2515_OSC_HZ == 16000000u
     if (bitrate == 500000u) {
         write_reg(CNF1, 0x00);
-        write_reg(CNF2, 0xF0);
-        write_reg(CNF3, 0x86);
+        write_reg(CNF2, 0xAC);
+        write_reg(CNF3, 0x03);
         return true;
     }
     if (bitrate == 250000u) {
-        write_reg(CNF1, 0x41);
-        write_reg(CNF2, 0xF1);
-        write_reg(CNF3, 0x85);
+        write_reg(CNF1, 0x01);
+        write_reg(CNF2, 0xAC);
+        write_reg(CNF3, 0x03);
         return true;
     }
     if (bitrate == 125000u) {
         write_reg(CNF1, 0x03);
-        write_reg(CNF2, 0xF0);
-        write_reg(CNF3, 0x86);
+        write_reg(CNF2, 0xAC);
+        write_reg(CNF3, 0x03);
         return true;
     }
 #elif PICOJ_MCP2515_OSC_HZ == 8000000u
     if (bitrate == 500000u) {
         write_reg(CNF1, 0x00);
-        write_reg(CNF2, 0x90);
-        write_reg(CNF3, 0x82);
+        write_reg(CNF2, 0x91);
+        write_reg(CNF3, 0x01);
         return true;
     }
     if (bitrate == 250000u) {
         write_reg(CNF1, 0x00);
-        write_reg(CNF2, 0xB1);
-        write_reg(CNF3, 0x85);
+        write_reg(CNF2, 0xAC);
+        write_reg(CNF3, 0x03);
         return true;
     }
     if (bitrate == 125000u) {
         write_reg(CNF1, 0x01);
-        write_reg(CNF2, 0xB1);
-        write_reg(CNF3, 0x85);
+        write_reg(CNF2, 0xAC);
+        write_reg(CNF3, 0x03);
         return true;
     }
 #endif
@@ -217,9 +222,9 @@ bool mcp2515_set_bitrate(uint32_t bitrate) {
     return true;
 }
 
-bool mcp2515_send(const picoj_can_frame_t* frame) {
+mcp2515_tx_result_t mcp2515_send(const picoj_can_frame_t* frame) {
     if (!frame || frame->dlc > 8) {
-        return false;
+        return MCP2515_TX_ERROR;
     }
 
     uint8_t ctrl_reg = 0;
@@ -238,7 +243,7 @@ bool mcp2515_send(const picoj_can_frame_t* frame) {
         id_reg = TXB2SIDH;
         rts = 0x84;
     } else {
-        return false;
+        return MCP2515_TX_BUSY;
     }
 
     bit_modify(ctrl_reg, TXB_ERROR_FLAGS, 0);
@@ -255,7 +260,22 @@ bool mcp2515_send(const picoj_can_frame_t* frame) {
     cs_select();
     spi_xfer(rts);
     cs_deselect();
-    return true;
+
+    const absolute_time_t deadline = make_timeout_time_us(MCP_TX_TIMEOUT_US);
+    while (!time_reached(deadline)) {
+        uint8_t ctrl = read_reg(ctrl_reg);
+        if (ctrl & TXB_FATAL_FLAGS) {
+            bit_modify(ctrl_reg, TXB_TXREQ | TXB_ERROR_FLAGS, 0);
+            return MCP2515_TX_ERROR;
+        }
+        if ((ctrl & TXB_TXREQ) == 0) {
+            return MCP2515_TX_OK;
+        }
+        sleep_us(100);
+    }
+
+    bit_modify(ctrl_reg, TXB_TXREQ | TXB_ERROR_FLAGS, 0);
+    return MCP2515_TX_ERROR;
 }
 
 bool mcp2515_read(picoj_can_frame_t* frame) {

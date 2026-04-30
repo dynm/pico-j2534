@@ -4,7 +4,7 @@
 
 #define PICOJ_USB_VID 0x1209
 #define PICOJ_USB_PID 0x2534
-#define PICOJ_USB_VERSION 0x0103
+#define PICOJ_USB_VERSION 0x0104
 
 #define PICOJ_USB_PACKET_SIZE 64
 #define PICOJ_PACKET_MAGIC 0x4A50u
@@ -17,6 +17,7 @@ typedef enum picoj_cmd {
     PICOJ_CMD_CAN_TX = 0x03,
     PICOJ_CMD_CAN_RX = 0x04,
     PICOJ_CMD_STATUS = 0x05,
+    PICOJ_CMD_CLEAR_RX = 0x06,
 } picoj_cmd_t;
 
 typedef enum picoj_can_flags {

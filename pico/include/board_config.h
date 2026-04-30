@@ -15,5 +15,10 @@
 #define PICOJ_STATUS_LED_ACTIVE_HIGH 1
 
 // Most MCP2515 CAN boards use either 8 MHz or 16 MHz crystals.
+#ifndef PICOJ_MCP2515_OSC_HZ
 #define PICOJ_MCP2515_OSC_HZ 16000000u
+#endif
+
+#ifndef PICOJ_DEFAULT_CAN_BITRATE
 #define PICOJ_DEFAULT_CAN_BITRATE 500000u
+#endif

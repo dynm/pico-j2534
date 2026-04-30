@@ -165,6 +165,19 @@ void WinUsbTransport::closeUnlocked() {
     bulkOut_ = kInvalidPipe;
 }
 
+void WinUsbTransport::flushInputUnlocked() {
+    pendingPackets_.clear();
+    if (!isOpen() || bulkIn_ == kInvalidPipe) {
+        return;
+    }
+    if (!WinUsb_FlushPipe(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_), bulkIn_)) {
+        const DWORD error = GetLastError();
+        if (isDisconnectError(error)) {
+            closeUnlocked();
+        }
+    }
+}
+
 bool WinUsbTransport::isOpen() const {
     return winusbHandle_ != nullptr;
 }
@@ -181,9 +194,12 @@ bool WinUsbTransport::transact(uint8_t cmd, const void* outData, uint8_t outLen,
         return false;
     }
 
+    flushInputUnlocked();
+
     picoj_packet_t request{};
     request.magic = PICOJ_PACKET_MAGIC;
-    request.seq = seq_++;
+    request.seq = seq_;
+    seq_ = static_cast<uint8_t>(seq_ == 0xFF ? 1 : seq_ + 1);
     request.cmd = cmd;
     request.len = outLen;
     if (outData && outLen) {
@@ -207,14 +223,15 @@ bool WinUsbTransport::transact(uint8_t cmd, const void* outData, uint8_t outLen,
             return false;
         }
 
-        if (response.magic == PICOJ_PACKET_MAGIC && response.seq == request.seq) {
-            return true;
-        }
         if (response.cmd == PICOJ_CMD_CAN_RX) {
             if (pendingPackets_.size() >= kMaxPendingPackets) {
                 pendingPackets_.pop_front();
             }
             pendingPackets_.push_back(response);
+            continue;
+        }
+        if (response.magic == PICOJ_PACKET_MAGIC && response.seq == request.seq) {
+            return true;
         }
     }
 }
@@ -231,7 +248,7 @@ bool WinUsbTransport::readPacket(picoj_packet_t& packet, unsigned timeoutMs) {
 
 void WinUsbTransport::clearPending() {
     std::lock_guard<std::mutex> lock(ioMutex_);
-    pendingPackets_.clear();
+    flushInputUnlocked();
 }
 
 void WinUsbTransport::restorePending(const std::vector<picoj_packet_t>& packets) {

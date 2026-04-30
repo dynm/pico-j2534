@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "isotp.h"
@@ -19,7 +22,9 @@ constexpr unsigned long kDeviceId = 1;
 constexpr unsigned long kChannelId = 1;
 constexpr unsigned kDefaultTimeoutMs = 1000;
 constexpr unsigned kDefaultCanTxTimeoutMs = 100;
+constexpr unsigned kReadPollSliceMs = 20;
 constexpr size_t kMaxFilters = 64;
+constexpr size_t kMaxPeriodicMsgs = 16;
 
 struct MessageFilter {
     bool active = false;
@@ -32,17 +37,30 @@ struct MessageFilter {
     uint32_t flowControlCanId = 0;
 };
 
+struct PeriodicMessage {
+    bool active = false;
+    unsigned long id = 0;
+    PASSTHRU_MSG msg{};
+    unsigned long intervalMs = 0;
+    DWORD nextDueMs = 0;
+};
+
 struct ChannelState {
     bool connected = false;
     unsigned long protocol = CAN;
     unsigned long flags = 0;
     unsigned long baudrate = 500000;
     unsigned long nextFilterId = 1;
+    unsigned long nextPeriodicId = 1;
     std::array<MessageFilter, kMaxFilters> filters{};
+    std::array<PeriodicMessage, kMaxPeriodicMsgs> periodic{};
     IsoTpReassembler isoRx;
 };
 
 std::mutex g_lock;
+std::condition_variable g_periodicCv;
+std::thread g_periodicThread;
+bool g_periodicStop = false;
 WinUsbTransport g_usb;
 ChannelState g_channel;
 std::string g_lastError = "No error";
@@ -186,6 +204,12 @@ bool frameMatchesFilter(const picoj_can_frame_t& frame, const MessageFilter& fil
 }
 
 bool framePassesFilters(const picoj_can_frame_t& frame) {
+    for (const auto& filter : g_channel.filters) {
+        if (filter.active && filter.type == BLOCK_FILTER && frameMatchesFilter(frame, filter)) {
+            return false;
+        }
+    }
+
     bool hasPassFilter = false;
     for (const auto& filter : g_channel.filters) {
         if (!filter.active || (filter.type != PASS_FILTER && filter.type != FLOW_CONTROL_FILTER)) {
@@ -251,6 +275,10 @@ long sendCan(const picoj_can_frame_t& frame, unsigned timeoutMs) {
                 Sleep(1);
                 continue;
             }
+            if (status.code == -4) {
+                setLastError("CAN transmit failed; check bus bitrate, MCP2515 oscillator setting, wiring, and bus acknowledgement");
+                return ERR_FAILED;
+            }
             setLastError("Firmware rejected CAN transmit");
             return ERR_FAILED;
         }
@@ -275,6 +303,104 @@ long sendIsoTpFlowControl(const picoj_can_frame_t& responseFrame) {
     }
     return STATUS_NOERROR;
 }
+
+long sendIsoTp(uint32_t canId, bool extended, const uint8_t* data, size_t size, unsigned timeoutMs);
+
+long sendPeriodicMessage(const PASSTHRU_MSG& msg, unsigned long protocol, unsigned long channelFlags) {
+    if (msg.DataSize < 4 || msg.DataSize > sizeof(msg.Data)) {
+        setLastError("Invalid periodic message size");
+        return ERR_INVALID_MSG;
+    }
+
+    const uint32_t canId = readCanId(msg);
+    const bool extended = (msg.TxFlags & CAN_29BIT_ID) || (channelFlags & CAN_29BIT_ID);
+
+    if (protocol == ISO15765) {
+        if (msg.DataSize - 4 > 7) {
+            setLastError("Periodic ISO-TP messages must fit in one CAN frame");
+            return ERR_INVALID_MSG;
+        }
+        return sendIsoTp(canId, extended, msg.Data + 4, msg.DataSize - 4, kDefaultCanTxTimeoutMs);
+    }
+
+    if (msg.DataSize - 4 > 8) {
+        setLastError("Periodic CAN payload exceeds 8 bytes");
+        return ERR_INVALID_MSG;
+    }
+
+    picoj_can_frame_t frame{};
+    frame.can_id = canId;
+    frame.flags = extended ? PICOJ_CAN_EXTENDED : 0;
+    frame.dlc = static_cast<uint8_t>(msg.DataSize - 4);
+    std::memcpy(frame.data, msg.Data + 4, frame.dlc);
+    return sendCan(frame, kDefaultCanTxTimeoutMs);
+}
+
+void periodicWorker() {
+    std::unique_lock<std::mutex> lock(g_lock);
+    while (!g_periodicStop) {
+        const DWORD now = GetTickCount();
+        DWORD nextWakeMs = 1000;
+        bool foundDue = false;
+        PeriodicMessage due{};
+        unsigned long protocol = CAN;
+        unsigned long flags = 0;
+
+        if (g_channel.connected && g_usb.isOpen()) {
+            for (auto& periodic : g_channel.periodic) {
+                if (!periodic.active) {
+                    continue;
+                }
+                const DWORD elapsedSinceDue = now - periodic.nextDueMs;
+                if (elapsedSinceDue < 0x80000000ul) {
+                    due = periodic;
+                    periodic.nextDueMs = now + periodic.intervalMs;
+                    protocol = g_channel.protocol;
+                    flags = g_channel.flags;
+                    foundDue = true;
+                    break;
+                }
+                const DWORD untilDue = periodic.nextDueMs - now;
+                nextWakeMs = std::min<DWORD>(nextWakeMs, untilDue);
+            }
+        }
+
+        if (!foundDue) {
+            g_periodicCv.wait_for(lock, std::chrono::milliseconds(nextWakeMs));
+            continue;
+        }
+
+        lock.unlock();
+        sendPeriodicMessage(due.msg, protocol, flags);
+        lock.lock();
+    }
+}
+
+void ensurePeriodicThread() {
+    if (!g_periodicThread.joinable()) {
+        g_periodicStop = false;
+        g_periodicThread = std::thread(periodicWorker);
+    }
+}
+
+void stopPeriodicThread() {
+    {
+        std::lock_guard<std::mutex> lock(g_lock);
+        g_periodicStop = true;
+        g_periodicCv.notify_all();
+    }
+    if (g_periodicThread.joinable()) {
+        g_periodicThread.join();
+    }
+}
+
+struct PeriodicThreadShutdown {
+    ~PeriodicThreadShutdown() {
+        stopPeriodicThread();
+    }
+};
+
+PeriodicThreadShutdown g_periodicThreadShutdown;
 
 long setBitrate(unsigned long bitrate) {
     picoj_bitrate_t request{bitrate};
@@ -520,13 +646,20 @@ extern "C" long WINAPI PassThruOpen(void*, unsigned long* pDeviceID) {
 
 extern "C" long WINAPI PassThruClose(unsigned long DeviceID) {
     logEvent("PassThruClose", "DeviceID=%lu", DeviceID);
-    std::lock_guard<std::mutex> lock(g_lock);
-    long status = ensureDevice(DeviceID);
-    if (status != STATUS_NOERROR) {
-        return status;
+    {
+        std::lock_guard<std::mutex> lock(g_lock);
+        long status = ensureDevice(DeviceID);
+        if (status != STATUS_NOERROR) {
+            return status;
+        }
+        g_channel = ChannelState{};
+        g_periodicCv.notify_all();
     }
-    g_channel = ChannelState{};
-    g_usb.close();
+    stopPeriodicThread();
+    {
+        std::lock_guard<std::mutex> lock(g_lock);
+        g_usb.close();
+    }
     return STATUS_NOERROR;
 }
 
@@ -584,12 +717,16 @@ extern "C" long WINAPI PassThruConnect(unsigned long DeviceID, unsigned long Pro
 
 extern "C" long WINAPI PassThruDisconnect(unsigned long ChannelID) {
     logEvent("PassThruDisconnect", "ChannelID=%lu", ChannelID);
-    std::lock_guard<std::mutex> lock(g_lock);
-    long status = ensureChannel(ChannelID);
-    if (status != STATUS_NOERROR) {
-        return status;
+    {
+        std::lock_guard<std::mutex> lock(g_lock);
+        long status = ensureChannel(ChannelID);
+        if (status != STATUS_NOERROR) {
+            return status;
+        }
+        g_channel = ChannelState{};
+        g_periodicCv.notify_all();
     }
-    g_channel = ChannelState{};
+    stopPeriodicThread();
     return STATUS_NOERROR;
 }
 
@@ -600,10 +737,13 @@ extern "C" long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG* p
         return ERR_NULL_PARAMETER;
     }
 
-    std::lock_guard<std::mutex> lock(g_lock);
-    long status = ensureChannel(ChannelID);
-    if (status != STATUS_NOERROR) {
-        return status;
+    long status = STATUS_NOERROR;
+    {
+        std::lock_guard<std::mutex> lock(g_lock);
+        status = ensureChannel(ChannelID);
+        if (status != STATUS_NOERROR) {
+            return status;
+        }
     }
 
     const unsigned long requested = *pNumMsgs;
@@ -624,14 +764,19 @@ extern "C" long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG* p
         }
 
         picoj_packet_t packet{};
-        const unsigned readTimeout = nonBlocking ? 1u : Timeout - elapsed;
+        const unsigned readTimeout = nonBlocking ? 1u : std::min<unsigned>(kReadPollSliceMs, Timeout - elapsed);
         if (!g_usb.readPacket(packet, readTimeout)) {
             if (!g_usb.isOpen()) {
+                std::lock_guard<std::mutex> lock(g_lock);
                 setLastError(g_usb.lastError());
                 g_channel = ChannelState{};
                 return *pNumMsgs ? STATUS_NOERROR : ERR_DEVICE_NOT_CONNECTED;
             }
+            if (g_usb.lastErrorWasTimeout() && !nonBlocking) {
+                continue;
+            }
             if (!g_usb.lastErrorWasTimeout()) {
+                std::lock_guard<std::mutex> lock(g_lock);
                 setLastError(g_usb.lastError());
             }
             return *pNumMsgs ? STATUS_NOERROR : ERR_BUFFER_EMPTY;
@@ -640,6 +785,12 @@ extern "C" long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG* p
         picoj_can_frame_t frame{};
         if (!decodeCanPacket(packet, frame)) {
             continue;
+        }
+
+        std::lock_guard<std::mutex> lock(g_lock);
+        status = ensureChannel(ChannelID);
+        if (status != STATUS_NOERROR) {
+            return *pNumMsgs ? STATUS_NOERROR : status;
         }
         if (!framePassesFilters(frame)) {
             continue;
@@ -738,20 +889,76 @@ extern "C" long WINAPI PassThruWriteMsgs(unsigned long ChannelID, PASSTHRU_MSG* 
 }
 
 extern "C" long WINAPI PassThruStartPeriodicMsg(unsigned long ChannelID, PASSTHRU_MSG* pMsg, unsigned long* pMsgID, unsigned long TimeInterval) {
-    logUnsupported("PassThruStartPeriodicMsg",
-                   "ChannelID=%lu Msg=%p MsgID=%p TimeInterval=%lu",
-                   ChannelID,
-                   static_cast<void*>(pMsg),
-                   static_cast<void*>(pMsgID),
-                   TimeInterval);
-    setLastError("Periodic messages are not implemented");
-    return ERR_NOT_SUPPORTED;
+    logEvent("PassThruStartPeriodicMsg",
+             "ChannelID=%lu Msg=%p MsgID=%p TimeInterval=%lu",
+             ChannelID,
+             static_cast<void*>(pMsg),
+             static_cast<void*>(pMsgID),
+             TimeInterval);
+    if (!pMsg || !pMsgID) {
+        setLastError("Null periodic message argument");
+        return ERR_NULL_PARAMETER;
+    }
+    if (TimeInterval == 0) {
+        setLastError("Invalid periodic message interval");
+        return ERR_INVALID_TIME_INTERVAL;
+    }
+    if (pMsg->DataSize < 4 || pMsg->DataSize > sizeof(pMsg->Data)) {
+        setLastError("Invalid periodic message size");
+        return ERR_INVALID_MSG;
+    }
+    std::lock_guard<std::mutex> lock(g_lock);
+    long status = ensureChannel(ChannelID);
+    if (status != STATUS_NOERROR) {
+        return status;
+    }
+    if (g_channel.protocol == CAN && pMsg->DataSize - 4 > 8) {
+        setLastError("Periodic CAN payload exceeds 8 bytes");
+        return ERR_INVALID_MSG;
+    }
+    if (g_channel.protocol == ISO15765 && pMsg->DataSize - 4 > 7) {
+        setLastError("Periodic ISO-TP messages must fit in one CAN frame");
+        return ERR_INVALID_MSG;
+    }
+
+    auto slot = std::find_if(g_channel.periodic.begin(), g_channel.periodic.end(), [](const PeriodicMessage& periodic) {
+        return !periodic.active;
+    });
+    if (slot == g_channel.periodic.end()) {
+        setLastError("Periodic message limit exceeded");
+        return ERR_EXCEEDED_LIMIT;
+    }
+
+    PeriodicMessage periodic{};
+    periodic.active = true;
+    periodic.id = g_channel.nextPeriodicId++;
+    periodic.msg = *pMsg;
+    periodic.intervalMs = TimeInterval;
+    periodic.nextDueMs = GetTickCount() + TimeInterval;
+    *slot = periodic;
+    *pMsgID = periodic.id;
+
+    ensurePeriodicThread();
+    g_periodicCv.notify_all();
+    return STATUS_NOERROR;
 }
 
 extern "C" long WINAPI PassThruStopPeriodicMsg(unsigned long ChannelID, unsigned long MsgID) {
-    logUnsupported("PassThruStopPeriodicMsg", "ChannelID=%lu MsgID=%lu", ChannelID, MsgID);
-    setLastError("Periodic messages are not implemented");
-    return ERR_NOT_SUPPORTED;
+    logEvent("PassThruStopPeriodicMsg", "ChannelID=%lu MsgID=%lu", ChannelID, MsgID);
+    std::lock_guard<std::mutex> lock(g_lock);
+    long status = ensureChannel(ChannelID);
+    if (status != STATUS_NOERROR) {
+        return status;
+    }
+    for (auto& periodic : g_channel.periodic) {
+        if (periodic.active && periodic.id == MsgID) {
+            periodic = PeriodicMessage{};
+            g_periodicCv.notify_all();
+            return STATUS_NOERROR;
+        }
+    }
+    setLastError("Invalid periodic message id");
+    return ERR_INVALID_MSG_ID;
 }
 
 extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID,
@@ -777,9 +984,9 @@ extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID,
     if (status != STATUS_NOERROR) {
         return status;
     }
-    if (FilterType != PASS_FILTER && FilterType != FLOW_CONTROL_FILTER) {
+    if (FilterType != PASS_FILTER && FilterType != BLOCK_FILTER && FilterType != FLOW_CONTROL_FILTER) {
         logUnsupported("PassThruStartMsgFilter", "ChannelID=%lu unsupported FilterType=%lu", ChannelID, FilterType);
-        setLastError("Only pass and flow-control filters are accepted");
+        setLastError("Only pass, block, and flow-control filters are accepted");
         return ERR_NOT_SUPPORTED;
     }
     if (!pMaskMsg || !pPatternMsg || pMaskMsg->DataSize < 4 || pPatternMsg->DataSize < 4) {
@@ -801,7 +1008,7 @@ extern "C" long WINAPI PassThruStartMsgFilter(unsigned long ChannelID,
     filter.type = FilterType;
     filter.maskCanId = readCanId(*pMaskMsg);
     filter.patternCanId = readCanId(*pPatternMsg);
-    filter.patternExtended = (pPatternMsg->TxFlags & CAN_29BIT_ID) != 0;
+    filter.patternExtended = ((pPatternMsg->TxFlags | pPatternMsg->RxStatus) & CAN_29BIT_ID) != 0;
 
     if (FilterType == FLOW_CONTROL_FILTER) {
         if (!pFlowControlMsg) {
@@ -989,9 +1196,24 @@ extern "C" long WINAPI PassThruIoctl(unsigned long ChannelID, unsigned long Ioct
     if (IoctlID == CLEAR_RX_BUFFER) {
         g_channel.isoRx.reset();
         g_usb.clearPending();
+        picoj_packet_t response{};
+        if (!g_usb.transact(PICOJ_CMD_CLEAR_RX, nullptr, 0, response, kDefaultTimeoutMs)) {
+            setLastError(g_usb.lastError());
+            if (!g_usb.isOpen()) {
+                g_channel = ChannelState{};
+                return ERR_DEVICE_NOT_CONNECTED;
+            }
+            return g_usb.lastErrorWasTimeout() ? ERR_TIMEOUT : ERR_FAILED;
+        }
         return STATUS_NOERROR;
     }
     if (IoctlID == CLEAR_TX_BUFFER || IoctlID == CLEAR_PERIODIC_MSGS) {
+        if (IoctlID == CLEAR_PERIODIC_MSGS) {
+            for (auto& periodic : g_channel.periodic) {
+                periodic = PeriodicMessage{};
+            }
+            g_periodicCv.notify_all();
+        }
         return STATUS_NOERROR;
     }
     logUnsupported("PassThruIoctl",

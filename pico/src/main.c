@@ -188,13 +188,17 @@ static void process_host_packet(const picoj_packet_t* packet) {
         }
         picoj_can_frame_t frame;
         memcpy(&frame, packet->payload, sizeof(frame));
-        bool sent = mcp2515_send(&frame);
-        if (sent) {
+        mcp2515_tx_result_t tx = mcp2515_send(&frame);
+        if (tx == MCP2515_TX_OK) {
             led_mark_activity();
         }
-        send_status(packet->seq, sent ? 0 : -3, frame.can_id);
+        send_status(packet->seq, tx == MCP2515_TX_OK ? 0 : (tx == MCP2515_TX_BUSY ? -3 : -4), frame.can_id);
         break;
     }
+    case PICOJ_CMD_CLEAR_RX:
+        can_rx_queue_clear();
+        send_status(packet->seq, 0, can_rx_overflows);
+        break;
     default:
         send_status(packet->seq, -127, packet->cmd);
         break;

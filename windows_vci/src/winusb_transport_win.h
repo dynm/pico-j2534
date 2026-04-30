@@ -26,6 +26,7 @@ public:
 
 private:
     void closeUnlocked();
+    void flushInputUnlocked();
     bool writePacketUnlocked(const picoj_packet_t& packet, unsigned timeoutMs);
     bool readPacketUnlocked(picoj_packet_t& packet, unsigned timeoutMs);
     void setError(const std::string& error);
