@@ -26,13 +26,16 @@
 #define RXB1CTRL 0x70
 #define TXB0CTRL 0x30
 #define TXB0SIDH 0x31
+#define TXB1CTRL 0x40
+#define TXB1SIDH 0x41
+#define TXB2CTRL 0x50
+#define TXB2SIDH 0x51
 #define RXB0SIDH 0x61
 #define RXB1SIDH 0x71
 
 #define CANCTRL_ABORT_ALL 0x10
 #define TXB_TXREQ 0x08
 #define TXB_ERROR_FLAGS 0x70
-#define TXB_BUSY_TIMEOUT_MS 200u
 
 static void cs_select(void) {
     gpio_put(PICOJ_CAN_PIN_CS, 0);
@@ -90,40 +93,6 @@ static bool set_mode(uint8_t mode) {
         sleep_ms(1);
     }
     return false;
-}
-
-static bool abort_tx0(void) {
-    bit_modify(CANCTRL, CANCTRL_ABORT_ALL, CANCTRL_ABORT_ALL);
-    bool available = false;
-    for (int i = 0; i < 20; ++i) {
-        if ((read_reg(TXB0CTRL) & TXB_TXREQ) == 0) {
-            available = true;
-            break;
-        }
-    }
-    bit_modify(CANCTRL, CANCTRL_ABORT_ALL, 0);
-    bit_modify(TXB0CTRL, TXB_TXREQ | TXB_ERROR_FLAGS, 0);
-    return available || ((read_reg(TXB0CTRL) & TXB_TXREQ) == 0);
-}
-
-static bool wait_tx0_available(void) {
-    const uint32_t start = to_ms_since_boot(get_absolute_time());
-    while (true) {
-        uint8_t ctrl = read_reg(TXB0CTRL);
-        if ((ctrl & TXB_TXREQ) == 0) {
-            if (ctrl & TXB_ERROR_FLAGS) {
-                bit_modify(TXB0CTRL, TXB_ERROR_FLAGS, 0);
-            }
-            return true;
-        }
-        if (ctrl & TXB_ERROR_FLAGS) {
-            return abort_tx0();
-        }
-        if (to_ms_since_boot(get_absolute_time()) - start >= TXB_BUSY_TIMEOUT_MS) {
-            return abort_tx0();
-        }
-        sleep_ms(1);
-    }
 }
 
 static bool set_cnf(uint32_t bitrate) {
@@ -185,6 +154,15 @@ static void write_id(uint8_t base, const picoj_can_frame_t* frame) {
     }
 }
 
+static bool tx_buffer_available(uint8_t ctrl_reg) {
+    uint8_t ctrl = read_reg(ctrl_reg);
+    if (ctrl & TXB_ERROR_FLAGS) {
+        bit_modify(ctrl_reg, TXB_TXREQ | TXB_ERROR_FLAGS, 0);
+        ctrl = read_reg(ctrl_reg);
+    }
+    return (ctrl & TXB_TXREQ) == 0;
+}
+
 static void read_id(uint8_t base, picoj_can_frame_t* frame) {
     uint8_t sidh = read_reg(base + 0);
     uint8_t sidl = read_reg(base + 1);
@@ -221,6 +199,8 @@ bool mcp2515_init(uint32_t bitrate) {
     write_reg(CANINTF, 0x00);
     write_reg(EFLG, 0x00);
     write_reg(TXB0CTRL, 0x00);
+    write_reg(TXB1CTRL, 0x00);
+    write_reg(TXB2CTRL, 0x00);
     write_reg(RXB0CTRL, 0x64); // Accept all frames and roll RXB0 over into RXB1.
     write_reg(RXB1CTRL, 0x60);
     write_reg(CANINTE, 0x03);
@@ -241,22 +221,39 @@ bool mcp2515_send(const picoj_can_frame_t* frame) {
     if (!frame || frame->dlc > 8) {
         return false;
     }
-    if (!wait_tx0_available()) {
+
+    uint8_t ctrl_reg = 0;
+    uint8_t id_reg = 0;
+    uint8_t rts = 0;
+    if (tx_buffer_available(TXB0CTRL)) {
+        ctrl_reg = TXB0CTRL;
+        id_reg = TXB0SIDH;
+        rts = MCP_RTS_TXB0;
+    } else if (tx_buffer_available(TXB1CTRL)) {
+        ctrl_reg = TXB1CTRL;
+        id_reg = TXB1SIDH;
+        rts = 0x82;
+    } else if (tx_buffer_available(TXB2CTRL)) {
+        ctrl_reg = TXB2CTRL;
+        id_reg = TXB2SIDH;
+        rts = 0x84;
+    } else {
         return false;
     }
 
-    write_id(TXB0SIDH, frame);
+    bit_modify(ctrl_reg, TXB_ERROR_FLAGS, 0);
+    write_id(id_reg, frame);
     uint8_t dlc = frame->dlc & 0x0F;
     if (frame->flags & PICOJ_CAN_RTR) {
         dlc |= 0x40;
     }
-    write_reg(TXB0SIDH + 4, dlc);
+    write_reg(id_reg + 4, dlc);
     for (uint8_t i = 0; i < frame->dlc; ++i) {
-        write_reg(TXB0SIDH + 5 + i, frame->data[i]);
+        write_reg(id_reg + 5 + i, frame->data[i]);
     }
 
     cs_select();
-    spi_xfer(MCP_RTS_TXB0);
+    spi_xfer(rts);
     cs_deselect();
     return true;
 }

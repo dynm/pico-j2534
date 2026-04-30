@@ -18,6 +18,7 @@ namespace {
 constexpr unsigned long kDeviceId = 1;
 constexpr unsigned long kChannelId = 1;
 constexpr unsigned kDefaultTimeoutMs = 1000;
+constexpr unsigned kDefaultCanTxTimeoutMs = 100;
 constexpr size_t kMaxFilters = 64;
 
 struct MessageFilter {
@@ -217,27 +218,45 @@ bool frameMatchesTxFlowControl(uint32_t requestCanId, bool extended, const picoj
 }
 
 long sendCan(const picoj_can_frame_t& frame, unsigned timeoutMs) {
-    picoj_packet_t response{};
-    if (!g_usb.transact(PICOJ_CMD_CAN_TX, &frame, sizeof(frame), response, timeoutMs ? timeoutMs : kDefaultTimeoutMs)) {
-        setLastError(g_usb.lastError());
-        if (!g_usb.isOpen()) {
-            g_channel = ChannelState{};
-            return ERR_DEVICE_NOT_CONNECTED;
-        }
-        if (g_usb.lastErrorWasTimeout()) {
+    const unsigned totalTimeout = timeoutMs ? timeoutMs : kDefaultCanTxTimeoutMs;
+    const DWORD start = GetTickCount();
+
+    for (;;) {
+        const unsigned remaining = remainingTimeoutMs(start, totalTimeout);
+        if (remaining == 0) {
+            setLastError("Timed out waiting for CAN transmit buffer");
             return ERR_TIMEOUT;
         }
-        return ERR_FAILED;
-    }
-    if (response.cmd == PICOJ_CMD_STATUS && response.len >= sizeof(picoj_status_t)) {
-        picoj_status_t status{};
-        std::memcpy(&status, response.payload, sizeof(status));
-        if (status.code != 0) {
+
+        picoj_packet_t response{};
+        if (!g_usb.transact(PICOJ_CMD_CAN_TX, &frame, sizeof(frame), response, remaining)) {
+            setLastError(g_usb.lastError());
+            if (!g_usb.isOpen()) {
+                g_channel = ChannelState{};
+                return ERR_DEVICE_NOT_CONNECTED;
+            }
+            if (g_usb.lastErrorWasTimeout()) {
+                return ERR_TIMEOUT;
+            }
+            return ERR_FAILED;
+        }
+
+        if (response.cmd == PICOJ_CMD_STATUS && response.len >= sizeof(picoj_status_t)) {
+            picoj_status_t status{};
+            std::memcpy(&status, response.payload, sizeof(status));
+            if (status.code == 0) {
+                return STATUS_NOERROR;
+            }
+            if (status.code == -3) {
+                Sleep(1);
+                continue;
+            }
             setLastError("Firmware rejected CAN transmit");
             return ERR_FAILED;
         }
+
+        return STATUS_NOERROR;
     }
-    return STATUS_NOERROR;
 }
 
 long sendIsoTpFlowControl(const picoj_can_frame_t& responseFrame) {
