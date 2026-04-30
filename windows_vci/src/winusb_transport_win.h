@@ -20,6 +20,7 @@ public:
     const std::string& lastError() const { return lastError_; }
 
 private:
+    void closeUnlocked();
     bool writePacketUnlocked(const picoj_packet_t& packet, unsigned timeoutMs);
     bool readPacketUnlocked(picoj_packet_t& packet, unsigned timeoutMs);
     void setError(const std::string& error);

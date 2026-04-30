@@ -155,6 +155,11 @@ long ensureChannel(unsigned long channelId) {
         setLastError("Invalid or disconnected channel id");
         return ERR_INVALID_CHANNEL_ID;
     }
+    if (!g_usb.isOpen()) {
+        g_channel = ChannelState{};
+        setLastError("Pico J2534 device is not connected");
+        return ERR_DEVICE_NOT_CONNECTED;
+    }
     return STATUS_NOERROR;
 }
 
@@ -162,6 +167,10 @@ long sendCan(const picoj_can_frame_t& frame, unsigned timeoutMs) {
     picoj_packet_t response{};
     if (!g_usb.transact(PICOJ_CMD_CAN_TX, &frame, sizeof(frame), response, timeoutMs ? timeoutMs : kDefaultTimeoutMs)) {
         setLastError(g_usb.lastError());
+        if (!g_usb.isOpen()) {
+            g_channel = ChannelState{};
+            return ERR_DEVICE_NOT_CONNECTED;
+        }
         return ERR_FAILED;
     }
     if (response.cmd == PICOJ_CMD_STATUS && response.len >= sizeof(picoj_status_t)) {
@@ -194,6 +203,10 @@ long setBitrate(unsigned long bitrate) {
     picoj_packet_t response{};
     if (!g_usb.transact(PICOJ_CMD_SET_BITRATE, &request, sizeof(request), response, kDefaultTimeoutMs)) {
         setLastError(g_usb.lastError());
+        if (!g_usb.isOpen()) {
+            g_channel = ChannelState{};
+            return ERR_DEVICE_NOT_CONNECTED;
+        }
         return ERR_FAILED;
     }
     if (response.cmd == PICOJ_CMD_STATUS && response.len >= sizeof(picoj_status_t)) {
@@ -229,6 +242,24 @@ void fillCanMessage(PASSTHRU_MSG& msg, unsigned long protocol, const picoj_can_f
     }
 }
 
+long openUsbDevice() {
+    if (!g_usb.open()) {
+        setLastError(g_usb.lastError());
+        logEvent("OpenUsbDevice", "failed to open USB: %s", g_lastError.c_str());
+        return ERR_DEVICE_NOT_CONNECTED;
+    }
+
+    picoj_packet_t response{};
+    if (!g_usb.transact(PICOJ_CMD_HELLO, nullptr, 0, response, kDefaultTimeoutMs)) {
+        setLastError(g_usb.lastError());
+        logEvent("OpenUsbDevice", "HELLO failed: %s", g_lastError.c_str());
+        g_usb.close();
+        return ERR_DEVICE_NOT_CONNECTED;
+    }
+
+    return STATUS_NOERROR;
+}
+
 } // namespace
 
 extern "C" long WINAPI PassThruOpen(void*, unsigned long* pDeviceID) {
@@ -240,22 +271,26 @@ extern "C" long WINAPI PassThruOpen(void*, unsigned long* pDeviceID) {
 
     std::lock_guard<std::mutex> lock(g_lock);
     if (g_usb.isOpen()) {
+        picoj_packet_t response{};
+        if (!g_channel.connected && !g_usb.transact(PICOJ_CMD_HELLO, nullptr, 0, response, kDefaultTimeoutMs)) {
+            setLastError(g_usb.lastError());
+            logEvent("PassThruOpen", "existing USB handle failed HELLO: %s", g_lastError.c_str());
+            g_usb.close();
+            g_channel = ChannelState{};
+        } else {
+            *pDeviceID = kDeviceId;
+            return STATUS_NOERROR;
+        }
+    }
+
+    if (g_usb.isOpen()) {
         *pDeviceID = kDeviceId;
         return STATUS_NOERROR;
     }
 
-    if (!g_usb.open()) {
-        setLastError(g_usb.lastError());
-        logEvent("PassThruOpen", "failed to open USB: %s", g_lastError.c_str());
-        return ERR_DEVICE_NOT_CONNECTED;
-    }
-
-    picoj_packet_t response{};
-    if (!g_usb.transact(PICOJ_CMD_HELLO, nullptr, 0, response, kDefaultTimeoutMs)) {
-        setLastError(g_usb.lastError());
-        logEvent("PassThruOpen", "HELLO failed: %s", g_lastError.c_str());
-        g_usb.close();
-        return ERR_DEVICE_NOT_CONNECTED;
+    long status = openUsbDevice();
+    if (status != STATUS_NOERROR) {
+        return status;
     }
 
     *pDeviceID = kDeviceId;
@@ -299,9 +334,15 @@ extern "C" long WINAPI PassThruConnect(unsigned long DeviceID, unsigned long Pro
     }
 
     std::lock_guard<std::mutex> lock(g_lock);
-    long status = ensureDevice(DeviceID);
-    if (status != STATUS_NOERROR) {
-        return status;
+    if (DeviceID != kDeviceId) {
+        setLastError("Invalid device id");
+        return ERR_INVALID_DEVICE_ID;
+    }
+    if (!g_usb.isOpen()) {
+        long openStatus = openUsbDevice();
+        if (openStatus != STATUS_NOERROR) {
+            return openStatus;
+        }
     }
     if (g_channel.connected) {
         setLastError("Channel already connected");
@@ -367,6 +408,10 @@ extern "C" long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG* p
         const unsigned readTimeout = nonBlocking ? 1u : Timeout - elapsed;
         if (!g_usb.readPacket(packet, readTimeout)) {
             setLastError(g_usb.lastError());
+            if (!g_usb.isOpen()) {
+                g_channel = ChannelState{};
+                return *pNumMsgs ? STATUS_NOERROR : ERR_DEVICE_NOT_CONNECTED;
+            }
             return *pNumMsgs ? STATUS_NOERROR : ERR_BUFFER_EMPTY;
         }
 

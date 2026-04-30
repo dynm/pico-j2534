@@ -36,7 +36,7 @@ WinUsbTransport::~WinUsbTransport() {
 
 bool WinUsbTransport::open() {
     std::lock_guard<std::mutex> lock(ioMutex_);
-    close();
+    closeUnlocked();
 
     std::string openError = "Pico J2534 WinUSB interface not found";
     auto openByGuid = [this, &openError](const GUID& guid) {
@@ -108,6 +108,7 @@ bool WinUsbTransport::open() {
                 winusbHandle_ = usb;
                 bulkIn_ = bulkIn;
                 bulkOut_ = bulkOut;
+                seq_ = 1;
                 SetupDiDestroyDeviceInfoList(devInfo);
                 return true;
             }
@@ -130,6 +131,11 @@ bool WinUsbTransport::open() {
 }
 
 void WinUsbTransport::close() {
+    std::lock_guard<std::mutex> lock(ioMutex_);
+    closeUnlocked();
+}
+
+void WinUsbTransport::closeUnlocked() {
     if (winusbHandle_) {
         WinUsb_Free(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_));
         winusbHandle_ = nullptr;
@@ -196,7 +202,15 @@ bool WinUsbTransport::readPacket(picoj_packet_t& packet, unsigned timeoutMs) {
 
 bool WinUsbTransport::writePacketUnlocked(const picoj_packet_t& packet, unsigned timeoutMs) {
     ULONG timeout = timeoutMs;
-    WinUsb_SetPipePolicy(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_), bulkOut_, PIPE_TRANSFER_TIMEOUT, sizeof(timeout), &timeout);
+    if (!WinUsb_SetPipePolicy(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_),
+                              bulkOut_,
+                              PIPE_TRANSFER_TIMEOUT,
+                              sizeof(timeout),
+                              &timeout)) {
+        setError(windowsError("WinUSB set bulk OUT timeout failed", GetLastError()));
+        closeUnlocked();
+        return false;
+    }
 
     ULONG transferred = 0;
     if (!WinUsb_WritePipe(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_),
@@ -207,6 +221,7 @@ bool WinUsbTransport::writePacketUnlocked(const picoj_packet_t& packet, unsigned
                           nullptr) ||
         transferred != sizeof(packet)) {
         setError(windowsError("WinUSB bulk write failed", GetLastError()));
+        closeUnlocked();
         return false;
     }
     return true;
@@ -229,7 +244,15 @@ bool WinUsbTransport::readPacketUnlocked(picoj_packet_t& packet, unsigned timeou
         }
 
         ULONG timeout = timeoutMs - elapsed;
-        WinUsb_SetPipePolicy(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_), bulkIn_, PIPE_TRANSFER_TIMEOUT, sizeof(timeout), &timeout);
+        if (!WinUsb_SetPipePolicy(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_),
+                                  bulkIn_,
+                                  PIPE_TRANSFER_TIMEOUT,
+                                  sizeof(timeout),
+                                  &timeout)) {
+            setError(windowsError("WinUSB set bulk IN timeout failed", GetLastError()));
+            closeUnlocked();
+            return false;
+        }
 
         ULONG transferred = 0;
         if (!WinUsb_ReadPipe(static_cast<WINUSB_INTERFACE_HANDLE>(winusbHandle_),
@@ -239,6 +262,7 @@ bool WinUsbTransport::readPacketUnlocked(picoj_packet_t& packet, unsigned timeou
                              &transferred,
                              nullptr)) {
             setError(windowsError("WinUSB bulk read failed", GetLastError()));
+            closeUnlocked();
             return false;
         }
 
