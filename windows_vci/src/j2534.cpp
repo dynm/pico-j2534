@@ -2,14 +2,13 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
-#include <thread>
+#include <vector>
 
 #include "isotp.h"
 #include "winusb_transport_win.h"
@@ -19,7 +18,7 @@ namespace {
 constexpr unsigned long kDeviceId = 1;
 constexpr unsigned long kChannelId = 1;
 constexpr unsigned kDefaultTimeoutMs = 1000;
-constexpr size_t kMaxFilters = 8;
+constexpr size_t kMaxFilters = 64;
 
 struct MessageFilter {
     bool active = false;
@@ -199,6 +198,24 @@ bool framePassesFilters(const picoj_can_frame_t& frame) {
     return !hasPassFilter;
 }
 
+unsigned remainingTimeoutMs(DWORD start, unsigned timeoutMs) {
+    const DWORD elapsed = GetTickCount() - start;
+    return elapsed >= timeoutMs ? 0 : timeoutMs - elapsed;
+}
+
+bool hasTxFlowControlFilter(uint32_t requestCanId, bool extended) {
+    return std::any_of(g_channel.filters.begin(), g_channel.filters.end(), [requestCanId, extended](const MessageFilter& filter) {
+        return filter.active && filter.flowControl && filter.flowControlCanId == requestCanId && filter.patternExtended == extended;
+    });
+}
+
+bool frameMatchesTxFlowControl(uint32_t requestCanId, bool extended, const picoj_can_frame_t& frame) {
+    return std::any_of(g_channel.filters.begin(), g_channel.filters.end(), [requestCanId, extended, &frame](const MessageFilter& filter) {
+        return filter.active && filter.flowControl && filter.flowControlCanId == requestCanId && filter.patternExtended == extended &&
+               frameMatchesFilter(frame, filter);
+    });
+}
+
 long sendCan(const picoj_can_frame_t& frame, unsigned timeoutMs) {
     picoj_packet_t response{};
     if (!g_usb.transact(PICOJ_CMD_CAN_TX, &frame, sizeof(frame), response, timeoutMs ? timeoutMs : kDefaultTimeoutMs)) {
@@ -206,6 +223,9 @@ long sendCan(const picoj_can_frame_t& frame, unsigned timeoutMs) {
         if (!g_usb.isOpen()) {
             g_channel = ChannelState{};
             return ERR_DEVICE_NOT_CONNECTED;
+        }
+        if (g_usb.lastErrorWasTimeout()) {
+            return ERR_TIMEOUT;
         }
         return ERR_FAILED;
     }
@@ -246,6 +266,9 @@ long setBitrate(unsigned long bitrate) {
             g_channel = ChannelState{};
             return ERR_DEVICE_NOT_CONNECTED;
         }
+        if (g_usb.lastErrorWasTimeout()) {
+            return ERR_TIMEOUT;
+        }
         return ERR_FAILED;
     }
     if (response.cmd == PICOJ_CMD_STATUS && response.len >= sizeof(picoj_status_t)) {
@@ -257,6 +280,143 @@ long setBitrate(unsigned long bitrate) {
         }
     }
     g_channel.baudrate = bitrate;
+    return STATUS_NOERROR;
+}
+
+bool decodeCanPacket(const picoj_packet_t& packet, picoj_can_frame_t& frame);
+
+void restoreSkippedPackets(const std::vector<picoj_packet_t>& skippedPackets) {
+    if (!skippedPackets.empty()) {
+        g_usb.restorePending(skippedPackets);
+    }
+}
+
+long waitIsoTpFlowControl(uint32_t requestCanId, bool extended, unsigned timeoutMs, IsoTpFlowControl& flowControl) {
+    if (!hasTxFlowControlFilter(requestCanId, extended)) {
+        setLastError("No ISO-TP flow-control filter for transmit");
+        return ERR_NO_FLOW_CONTROL;
+    }
+
+    const DWORD start = GetTickCount();
+    std::vector<picoj_packet_t> skippedPackets;
+    for (;;) {
+        const unsigned remaining = remainingTimeoutMs(start, timeoutMs);
+        if (remaining == 0) {
+            restoreSkippedPackets(skippedPackets);
+            setLastError("Timed out waiting for ISO-TP flow control");
+            return ERR_TIMEOUT;
+        }
+
+        picoj_packet_t packet{};
+        if (!g_usb.readPacket(packet, remaining)) {
+            restoreSkippedPackets(skippedPackets);
+            if (!g_usb.isOpen()) {
+                g_channel = ChannelState{};
+                setLastError(g_usb.lastError());
+                return ERR_DEVICE_NOT_CONNECTED;
+            }
+            setLastError(g_usb.lastError());
+            return g_usb.lastErrorWasTimeout() ? ERR_TIMEOUT : ERR_FAILED;
+        }
+
+        picoj_can_frame_t frame{};
+        if (!decodeCanPacket(packet, frame)) {
+            skippedPackets.push_back(packet);
+            continue;
+        }
+        if (!frameMatchesTxFlowControl(requestCanId, extended, frame)) {
+            skippedPackets.push_back(packet);
+            continue;
+        }
+        if (!isotpParseFlowControl(frame, flowControl)) {
+            skippedPackets.push_back(packet);
+            continue;
+        }
+
+        if (flowControl.status == IsoTpFlowStatus::Wait) {
+            continue;
+        }
+
+        restoreSkippedPackets(skippedPackets);
+        if (flowControl.status == IsoTpFlowStatus::Overflow) {
+            setLastError("ECU rejected ISO-TP transmit with flow-control overflow");
+            return ERR_FAILED;
+        }
+        return STATUS_NOERROR;
+    }
+}
+
+long sendIsoTp(uint32_t canId, bool extended, const uint8_t* data, size_t size, unsigned timeoutMs) {
+    if (size > 4095) {
+        setLastError("ISO-TP payload exceeds 4095 bytes");
+        return ERR_INVALID_MSG;
+    }
+
+    auto frames = isotpSegment(canId, extended, data, size);
+    if (frames.empty()) {
+        setLastError("ISO-TP segmentation produced no frames");
+        return ERR_INVALID_MSG;
+    }
+    if (frames.size() == 1) {
+        return sendCan(frames.front(), timeoutMs);
+    }
+
+    const unsigned totalTimeout = timeoutMs ? timeoutMs : kDefaultTimeoutMs;
+    const DWORD start = GetTickCount();
+
+    unsigned remaining = remainingTimeoutMs(start, totalTimeout);
+    if (remaining == 0) {
+        setLastError("ISO-TP transmit timed out");
+        return ERR_TIMEOUT;
+    }
+    long status = sendCan(frames.front(), remaining);
+    if (status != STATUS_NOERROR) {
+        return status;
+    }
+
+    IsoTpFlowControl flowControl{};
+    remaining = remainingTimeoutMs(start, totalTimeout);
+    if (remaining == 0) {
+        setLastError("ISO-TP transmit timed out before flow-control response");
+        return ERR_TIMEOUT;
+    }
+    status = waitIsoTpFlowControl(canId, extended, remaining, flowControl);
+    if (status != STATUS_NOERROR) {
+        return status;
+    }
+
+    uint8_t sentInBlock = 0;
+    for (size_t i = 1; i < frames.size(); ++i) {
+        if (flowControl.blockSize != 0 && sentInBlock >= flowControl.blockSize) {
+            remaining = remainingTimeoutMs(start, totalTimeout);
+            if (remaining == 0) {
+                setLastError("ISO-TP transmit timed out waiting for next flow-control response");
+                return ERR_TIMEOUT;
+            }
+            status = waitIsoTpFlowControl(canId, extended, remaining, flowControl);
+            if (status != STATUS_NOERROR) {
+                return status;
+            }
+            sentInBlock = 0;
+        }
+
+        const unsigned stMinDelayMs = isotpStMinDelayMs(flowControl.stMin);
+        if (stMinDelayMs != 0 && sentInBlock != 0) {
+            Sleep(stMinDelayMs);
+        }
+
+        remaining = remainingTimeoutMs(start, totalTimeout);
+        if (remaining == 0) {
+            setLastError("ISO-TP transmit timed out while sending consecutive frames");
+            return ERR_TIMEOUT;
+        }
+        status = sendCan(frames[i], remaining);
+        if (status != STATUS_NOERROR) {
+            return status;
+        }
+        ++sentInBlock;
+    }
+
     return STATUS_NOERROR;
 }
 
@@ -292,8 +452,9 @@ long openUsbDevice() {
     if (!g_usb.transact(PICOJ_CMD_HELLO, nullptr, 0, response, kDefaultTimeoutMs)) {
         setLastError(g_usb.lastError());
         logEvent("OpenUsbDevice", "HELLO failed: %s", g_lastError.c_str());
+        const bool timedOut = g_usb.lastErrorWasTimeout();
         g_usb.close();
-        return ERR_DEVICE_NOT_CONNECTED;
+        return timedOut ? ERR_TIMEOUT : ERR_DEVICE_NOT_CONNECTED;
     }
 
     return STATUS_NOERROR;
@@ -531,13 +692,9 @@ extern "C" long WINAPI PassThruWriteMsgs(unsigned long ChannelID, PASSTHRU_MSG* 
         const bool extended = (msg.TxFlags & CAN_29BIT_ID) || (g_channel.flags & CAN_29BIT_ID);
 
         if (g_channel.protocol == ISO15765) {
-            auto frames = isotpSegment(canId, extended, msg.Data + 4, msg.DataSize - 4);
-            for (const auto& frame : frames) {
-                status = sendCan(frame, Timeout);
-                if (status != STATUS_NOERROR) {
-                    return status;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            status = sendIsoTp(canId, extended, msg.Data + 4, msg.DataSize - 4, Timeout);
+            if (status != STATUS_NOERROR) {
+                return status;
             }
         } else {
             if (msg.DataSize - 4 > 8) {
@@ -804,8 +961,18 @@ extern "C" long WINAPI PassThruIoctl(unsigned long ChannelID, unsigned long Ioct
         *static_cast<unsigned long*>(pOutput) = 12000;
         return STATUS_NOERROR;
     }
-    if (IoctlID == CLEAR_RX_BUFFER || IoctlID == CLEAR_TX_BUFFER || IoctlID == CLEAR_MSG_FILTERS || IoctlID == CLEAR_PERIODIC_MSGS) {
+    if (IoctlID == CLEAR_MSG_FILTERS) {
+        g_channel.filters = {};
+        g_channel.nextFilterId = 1;
         g_channel.isoRx.reset();
+        return STATUS_NOERROR;
+    }
+    if (IoctlID == CLEAR_RX_BUFFER) {
+        g_channel.isoRx.reset();
+        g_usb.clearPending();
+        return STATUS_NOERROR;
+    }
+    if (IoctlID == CLEAR_TX_BUFFER || IoctlID == CLEAR_PERIODIC_MSGS) {
         return STATUS_NOERROR;
     }
     logUnsupported("PassThruIoctl",

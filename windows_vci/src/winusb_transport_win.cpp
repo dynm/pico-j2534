@@ -26,6 +26,15 @@ std::string windowsError(const char* prefix, DWORD error) {
     return buffer;
 }
 
+bool isTimeoutError(DWORD error) {
+    return error == ERROR_SEM_TIMEOUT || error == ERROR_TIMEOUT;
+}
+
+bool isDisconnectError(DWORD error) {
+    return error == ERROR_DEVICE_NOT_CONNECTED || error == ERROR_DEV_NOT_EXIST || error == ERROR_INVALID_HANDLE ||
+           error == ERROR_GEN_FAILURE || error == ERROR_NOT_READY;
+}
+
 }
 
 WinUsbTransport::WinUsbTransport()
@@ -190,6 +199,7 @@ bool WinUsbTransport::transact(uint8_t cmd, const void* outData, uint8_t outLen,
         const DWORD elapsed = GetTickCount() - start;
         if (elapsed >= timeoutMs) {
             setError("WinUSB transaction timed out");
+            lastErrorWasTimeout_ = true;
             return false;
         }
 
@@ -219,6 +229,19 @@ bool WinUsbTransport::readPacket(picoj_packet_t& packet, unsigned timeoutMs) {
     return readPacketUnlocked(packet, timeoutMs);
 }
 
+void WinUsbTransport::clearPending() {
+    std::lock_guard<std::mutex> lock(ioMutex_);
+    pendingPackets_.clear();
+}
+
+void WinUsbTransport::restorePending(const std::vector<picoj_packet_t>& packets) {
+    std::lock_guard<std::mutex> lock(ioMutex_);
+    pendingPackets_.insert(pendingPackets_.begin(), packets.begin(), packets.end());
+    while (pendingPackets_.size() > kMaxPendingPackets) {
+        pendingPackets_.pop_back();
+    }
+}
+
 bool WinUsbTransport::writePacketUnlocked(const picoj_packet_t& packet, unsigned timeoutMs) {
     lastErrorWasTimeout_ = false;
     ULONG timeout = timeoutMs;
@@ -227,8 +250,11 @@ bool WinUsbTransport::writePacketUnlocked(const picoj_packet_t& packet, unsigned
                               PIPE_TRANSFER_TIMEOUT,
                               sizeof(timeout),
                               &timeout)) {
-        setError(windowsError("WinUSB set bulk OUT timeout failed", GetLastError()));
-        closeUnlocked();
+        const DWORD error = GetLastError();
+        setError(windowsError("WinUSB set bulk OUT timeout failed", error));
+        if (isDisconnectError(error)) {
+            closeUnlocked();
+        }
         return false;
     }
 
@@ -238,10 +264,25 @@ bool WinUsbTransport::writePacketUnlocked(const picoj_packet_t& packet, unsigned
                           const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(&packet)),
                           sizeof(packet),
                           &transferred,
-                          nullptr) ||
-        transferred != sizeof(packet)) {
-        setError(windowsError("WinUSB bulk write failed", GetLastError()));
-        closeUnlocked();
+                          nullptr)) {
+        const DWORD error = GetLastError();
+        setError(windowsError("WinUSB bulk write failed", error));
+        if (isTimeoutError(error)) {
+            lastErrorWasTimeout_ = true;
+        } else if (isDisconnectError(error)) {
+            closeUnlocked();
+        }
+        return false;
+    }
+    if (transferred != sizeof(packet)) {
+        char buffer[160]{};
+        std::snprintf(buffer,
+                      sizeof(buffer),
+                      "WinUSB bulk write transferred %lu of %zu bytes",
+                      static_cast<unsigned long>(transferred),
+                      sizeof(packet));
+        setError(buffer);
+        lastErrorWasTimeout_ = true;
         return false;
     }
     return true;
@@ -271,8 +312,11 @@ bool WinUsbTransport::readPacketUnlocked(picoj_packet_t& packet, unsigned timeou
                                   PIPE_TRANSFER_TIMEOUT,
                                   sizeof(timeout),
                                   &timeout)) {
-            setError(windowsError("WinUSB set bulk IN timeout failed", GetLastError()));
-            closeUnlocked();
+            const DWORD error = GetLastError();
+            setError(windowsError("WinUSB set bulk IN timeout failed", error));
+            if (isDisconnectError(error)) {
+                closeUnlocked();
+            }
             return false;
         }
 
@@ -285,10 +329,10 @@ bool WinUsbTransport::readPacketUnlocked(picoj_packet_t& packet, unsigned timeou
                              nullptr)) {
             const DWORD error = GetLastError();
             setError(windowsError("WinUSB bulk read failed", error));
-            if (error != ERROR_SEM_TIMEOUT && error != ERROR_TIMEOUT) {
-                closeUnlocked();
-            } else {
+            if (isTimeoutError(error)) {
                 lastErrorWasTimeout_ = true;
+            } else if (isDisconnectError(error)) {
+                closeUnlocked();
             }
             return false;
         }

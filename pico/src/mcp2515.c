@@ -21,12 +21,18 @@
 #define CNF1 0x2A
 #define CANINTE 0x2B
 #define CANINTF 0x2C
+#define EFLG 0x2D
 #define RXB0CTRL 0x60
 #define RXB1CTRL 0x70
 #define TXB0CTRL 0x30
 #define TXB0SIDH 0x31
 #define RXB0SIDH 0x61
 #define RXB1SIDH 0x71
+
+#define CANCTRL_ABORT_ALL 0x10
+#define TXB_TXREQ 0x08
+#define TXB_ERROR_FLAGS 0x70
+#define TXB_BUSY_TIMEOUT_MS 200u
 
 static void cs_select(void) {
     gpio_put(PICOJ_CAN_PIN_CS, 0);
@@ -84,6 +90,40 @@ static bool set_mode(uint8_t mode) {
         sleep_ms(1);
     }
     return false;
+}
+
+static bool abort_tx0(void) {
+    bit_modify(CANCTRL, CANCTRL_ABORT_ALL, CANCTRL_ABORT_ALL);
+    bool available = false;
+    for (int i = 0; i < 20; ++i) {
+        if ((read_reg(TXB0CTRL) & TXB_TXREQ) == 0) {
+            available = true;
+            break;
+        }
+    }
+    bit_modify(CANCTRL, CANCTRL_ABORT_ALL, 0);
+    bit_modify(TXB0CTRL, TXB_TXREQ | TXB_ERROR_FLAGS, 0);
+    return available || ((read_reg(TXB0CTRL) & TXB_TXREQ) == 0);
+}
+
+static bool wait_tx0_available(void) {
+    const uint32_t start = to_ms_since_boot(get_absolute_time());
+    while (true) {
+        uint8_t ctrl = read_reg(TXB0CTRL);
+        if ((ctrl & TXB_TXREQ) == 0) {
+            if (ctrl & TXB_ERROR_FLAGS) {
+                bit_modify(TXB0CTRL, TXB_ERROR_FLAGS, 0);
+            }
+            return true;
+        }
+        if (ctrl & TXB_ERROR_FLAGS) {
+            return abort_tx0();
+        }
+        if (to_ms_since_boot(get_absolute_time()) - start >= TXB_BUSY_TIMEOUT_MS) {
+            return abort_tx0();
+        }
+        sleep_ms(1);
+    }
 }
 
 static bool set_cnf(uint32_t bitrate) {
@@ -178,7 +218,10 @@ bool mcp2515_init(uint32_t bitrate) {
     if (!mcp2515_set_bitrate(bitrate)) {
         return false;
     }
-    write_reg(RXB0CTRL, 0x60); // Accept standard and extended frames.
+    write_reg(CANINTF, 0x00);
+    write_reg(EFLG, 0x00);
+    write_reg(TXB0CTRL, 0x00);
+    write_reg(RXB0CTRL, 0x64); // Accept all frames and roll RXB0 over into RXB1.
     write_reg(RXB1CTRL, 0x60);
     write_reg(CANINTE, 0x03);
     return set_mode(0x00);
@@ -198,7 +241,7 @@ bool mcp2515_send(const picoj_can_frame_t* frame) {
     if (!frame || frame->dlc > 8) {
         return false;
     }
-    if (read_reg(TXB0CTRL) & 0x08) {
+    if (!wait_tx0_available()) {
         return false;
     }
 
@@ -246,5 +289,6 @@ bool mcp2515_read(picoj_can_frame_t* frame) {
         frame->data[i] = read_reg(base + 5 + i);
     }
     bit_modify(CANINTF, clear_mask, 0);
+    bit_modify(EFLG, 0xC0, 0);
     return true;
 }

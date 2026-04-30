@@ -11,6 +11,18 @@ struct IsoTpFrame {
     std::vector<uint8_t> payload;
 };
 
+enum class IsoTpFlowStatus {
+    Continue,
+    Wait,
+    Overflow,
+};
+
+struct IsoTpFlowControl {
+    IsoTpFlowStatus status = IsoTpFlowStatus::Continue;
+    uint8_t blockSize = 0;
+    uint8_t stMin = 0;
+};
+
 class IsoTpReassembler {
 public:
     bool accept(const picoj_can_frame_t& frame, IsoTpFrame& out);
@@ -24,4 +36,6 @@ private:
     std::vector<uint8_t> buffer_;
 };
 
+bool isotpParseFlowControl(const picoj_can_frame_t& frame, IsoTpFlowControl& out);
+unsigned isotpStMinDelayMs(uint8_t stMin);
 std::vector<picoj_can_frame_t> isotpSegment(uint32_t canId, bool extended, const uint8_t* data, size_t size);

@@ -4,6 +4,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "pico_j2534_protocol.h"
 
@@ -18,6 +19,8 @@ public:
 
     bool transact(uint8_t cmd, const void* outData, uint8_t outLen, picoj_packet_t& response, unsigned timeoutMs);
     bool readPacket(picoj_packet_t& packet, unsigned timeoutMs);
+    void clearPending();
+    void restorePending(const std::vector<picoj_packet_t>& packets);
     const std::string& lastError() const { return lastError_; }
     bool lastErrorWasTimeout() const { return lastErrorWasTimeout_; }
 

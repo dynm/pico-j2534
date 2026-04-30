@@ -68,6 +68,36 @@ void IsoTpReassembler::reset() {
     buffer_.clear();
 }
 
+bool isotpParseFlowControl(const picoj_can_frame_t& frame, IsoTpFlowControl& out) {
+    if (frame.dlc < 3 || (frame.data[0] >> 4) != 0x3) {
+        return false;
+    }
+
+    const uint8_t flowStatus = frame.data[0] & 0x0F;
+    if (flowStatus == 0x0) {
+        out.status = IsoTpFlowStatus::Continue;
+    } else if (flowStatus == 0x1) {
+        out.status = IsoTpFlowStatus::Wait;
+    } else if (flowStatus == 0x2) {
+        out.status = IsoTpFlowStatus::Overflow;
+    } else {
+        return false;
+    }
+    out.blockSize = frame.data[1];
+    out.stMin = frame.data[2];
+    return true;
+}
+
+unsigned isotpStMinDelayMs(uint8_t stMin) {
+    if (stMin <= 0x7F) {
+        return stMin;
+    }
+    if (stMin >= 0xF1 && stMin <= 0xF9) {
+        return 1;
+    }
+    return 0;
+}
+
 std::vector<picoj_can_frame_t> isotpSegment(uint32_t canId, bool extended, const uint8_t* data, size_t size) {
     std::vector<picoj_can_frame_t> frames;
     const uint8_t flags = extended ? PICOJ_CAN_EXTENDED : 0;

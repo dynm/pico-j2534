@@ -13,7 +13,15 @@ static bool can_ready = false;
 static bool can_error = false;
 static uint32_t led_activity_until_ms = 0;
 
-#define PICOJ_USB_REPLY_TIMEOUT_MS 50u
+#define PICOJ_USB_REPLY_TIMEOUT_MS 1000u
+#define CAN_RX_QUEUE_CAPACITY 64u
+#define CAN_RX_DRAIN_LIMIT 16u
+
+static picoj_can_frame_t can_rx_queue[CAN_RX_QUEUE_CAPACITY];
+static uint8_t can_rx_head = 0;
+static uint8_t can_rx_tail = 0;
+static uint8_t can_rx_count = 0;
+static uint32_t can_rx_overflows = 0;
 
 static void led_write(bool on) {
     gpio_put(PICOJ_STATUS_LED_PIN, PICOJ_STATUS_LED_ACTIVE_HIGH ? on : !on);
@@ -84,6 +92,67 @@ static void send_status(uint8_t seq, int32_t code, uint32_t detail) {
     send_packet(seq, PICOJ_CMD_STATUS, &status, sizeof(status), PICOJ_USB_REPLY_TIMEOUT_MS);
 }
 
+static void can_rx_queue_clear(void) {
+    can_rx_head = 0;
+    can_rx_tail = 0;
+    can_rx_count = 0;
+}
+
+static void can_rx_queue_push(const picoj_can_frame_t* frame) {
+    if (!frame) {
+        return;
+    }
+    if (can_rx_count == CAN_RX_QUEUE_CAPACITY) {
+        can_rx_tail = (uint8_t)((can_rx_tail + 1u) % CAN_RX_QUEUE_CAPACITY);
+        --can_rx_count;
+        ++can_rx_overflows;
+    }
+    can_rx_queue[can_rx_head] = *frame;
+    can_rx_head = (uint8_t)((can_rx_head + 1u) % CAN_RX_QUEUE_CAPACITY);
+    ++can_rx_count;
+}
+
+static bool can_rx_queue_peek(picoj_can_frame_t* frame) {
+    if (!frame || can_rx_count == 0) {
+        return false;
+    }
+    *frame = can_rx_queue[can_rx_tail];
+    return true;
+}
+
+static void can_rx_queue_drop(void) {
+    if (can_rx_count == 0) {
+        return;
+    }
+    can_rx_tail = (uint8_t)((can_rx_tail + 1u) % CAN_RX_QUEUE_CAPACITY);
+    --can_rx_count;
+}
+
+static void drain_can_rx(void) {
+    for (uint8_t i = 0; i < CAN_RX_DRAIN_LIMIT; ++i) {
+        picoj_can_frame_t frame;
+        if (!mcp2515_read(&frame)) {
+            break;
+        }
+        can_rx_queue_push(&frame);
+        led_mark_activity();
+    }
+}
+
+static void flush_can_rx(void) {
+    while (can_rx_count > 0 && tud_vendor_mounted() && tud_vendor_write_available() >= sizeof(picoj_packet_t)) {
+        picoj_can_frame_t frame;
+        if (!can_rx_queue_peek(&frame)) {
+            break;
+        }
+        if (!send_packet(0, PICOJ_CMD_CAN_RX, &frame, sizeof(frame), 0)) {
+            break;
+        }
+        can_rx_queue_drop();
+        tud_task();
+    }
+}
+
 static void process_host_packet(const picoj_packet_t* packet) {
     if (!packet || packet->magic != PICOJ_PACKET_MAGIC || packet->len > PICOJ_PACKET_PAYLOAD_SIZE) {
         return;
@@ -108,6 +177,7 @@ static void process_host_packet(const picoj_packet_t* packet) {
         memcpy(&bitrate, packet->payload, sizeof(bitrate));
         can_ready = mcp2515_init(bitrate.bitrate);
         can_error = !can_ready;
+        can_rx_queue_clear();
         send_status(packet->seq, can_ready ? 0 : -2, bitrate.bitrate);
         break;
     }
@@ -119,7 +189,6 @@ static void process_host_packet(const picoj_packet_t* packet) {
         picoj_can_frame_t frame;
         memcpy(&frame, packet->payload, sizeof(frame));
         bool sent = mcp2515_send(&frame);
-        can_error = !sent;
         if (sent) {
             led_mark_activity();
         }
@@ -138,13 +207,13 @@ int main(void) {
     mcp2515_hw_init();
     can_ready = mcp2515_init(PICOJ_DEFAULT_CAN_BITRATE);
     can_error = !can_ready;
+    can_rx_queue_clear();
     tusb_init();
 
     while (true) {
         tud_task();
         led_update();
 
-        picoj_can_frame_t frame;
         if (tud_vendor_available() >= sizeof(picoj_packet_t)) {
             picoj_packet_t packet;
             tud_vendor_read(&packet, sizeof(packet));
@@ -152,9 +221,9 @@ int main(void) {
             process_host_packet(&packet);
         }
 
-        if (can_ready && tud_vendor_mounted() && mcp2515_read(&frame)) {
-            led_mark_activity();
-            send_packet(0, PICOJ_CMD_CAN_RX, &frame, sizeof(frame), 0);
+        if (can_ready) {
+            drain_can_rx();
+            flush_can_rx();
         }
     }
 }
