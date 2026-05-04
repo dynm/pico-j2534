@@ -18,7 +18,7 @@ add_library(pico_j2534 SHARED
 
 target_compile_features(pico_j2534 PRIVATE cxx_std_17)
 target_include_directories(pico_j2534 PRIVATE include)
-target_compile_definitions(pico_j2534 PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+target_compile_definitions(pico_j2534 PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(pico_j2534 PRIVATE setupapi winusb)
 if(MINGW)
     target_link_options(pico_j2534 PRIVATE -static -static-libgcc -static-libstdc++ -s)
@@ -35,7 +35,7 @@ add_executable(vin_smoke_test
 
 target_compile_features(vin_smoke_test PRIVATE cxx_std_17)
 target_include_directories(vin_smoke_test PRIVATE include)
-target_compile_definitions(vin_smoke_test PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_definitions(vin_smoke_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 if(MINGW)
     target_link_options(vin_smoke_test PRIVATE -static -static-libgcc -static-libstdc++ -s)
 endif()
@@ -46,7 +46,7 @@ add_executable(dts_can_monitor
 
 target_compile_features(dts_can_monitor PRIVATE cxx_std_17)
 target_include_directories(dts_can_monitor PRIVATE include)
-target_compile_definitions(dts_can_monitor PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_definitions(dts_can_monitor PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 if(MINGW)
     target_link_options(dts_can_monitor PRIVATE -static -static-libgcc -static-libstdc++ -s)
 endif()
