@@ -16,9 +16,15 @@ Commands:
 
 - `HELLO`: host probes firmware version and channel count.
 - `SET_BITRATE`: host sends `picoj_bitrate_t`; firmware configures the SPI CAN controller.
-- `CAN_TX`: host sends `picoj_can_frame_t`; firmware transmits the CAN frame.
+- `CAN_TX`: host sends `picoj_can_frame_t`; firmware queues the CAN frame into an MCP2515 TX buffer and returns `STATUS`.
 - `CAN_RX`: firmware sends unsolicited received CAN frames with sequence `0`.
 - `STATUS`: firmware response with `picoj_status_t`.
 - `CLEAR_RX`: host asks firmware to drop queued CAN receive frames and return `STATUS`.
+- `ISOTP_CONFIG`: host sends `picoj_isotp_config_t` to configure request, response, and flow-control CAN IDs for firmware-side ISO-TP.
+- `ISOTP_TX`: host sends one `picoj_isotp_chunk_t` payload chunk; firmware assembles chunks and starts `isotp-c` transmission when the full payload has arrived.
+- `ISOTP_RX`: firmware sends unsolicited `picoj_isotp_chunk_t` chunks with sequence `0` after `isotp-c` reassembles a complete ISO-TP payload.
+- `BOOTLOADER`: host asks firmware to return `STATUS` and reboot into the Pico USB UF2 bootloader.
+
+`picoj_isotp_chunk_t` carries up to 49 payload bytes per USB packet. `total_len` is limited to 4095 bytes to match classic ISO-TP normal addressing. `CAN_TX` and `CAN_RX` remain available for raw J2534 `CAN` traffic; ISO15765 traffic uses the ISO-TP commands so CAN consecutive-frame timing stays on the Pico instead of the Windows DLL scheduler.
 
 The firmware exposes Microsoft OS 2.0 descriptors with DeviceInterfaceGUID `{A9F78E2A-39A0-4A36-A6DF-6D80C96F54E1}`. The Windows DLL discovers that interface with SetupAPI and uses WinUSB bulk reads/writes.

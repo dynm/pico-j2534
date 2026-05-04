@@ -12,13 +12,11 @@
 
 namespace {
 
-constexpr unsigned long kObdRequestId = 0x7DF;
 constexpr unsigned long kObdResponseBase = 0x7E8;
 constexpr unsigned long kObdPhysicalRequestBase = 0x7E0;
 constexpr unsigned long kObdExactMask = 0x7FF;
 constexpr unsigned long kCanBaudrate = 500000;
 constexpr unsigned long kReadTimeoutMs = 250;
-constexpr unsigned long kFunctionalReadTimeMs = 5000;
 constexpr unsigned long kPhysicalReadTimeMs = 1500;
 
 using PassThruOpenFn = long(WINAPI*)(void*, unsigned long*);
@@ -169,17 +167,12 @@ std::string parseVinPayload(const PASSTHRU_MSG& msg) {
 
     const unsigned char* payload = msg.Data + 4;
     const size_t payloadSize = msg.DataSize - 4;
-    if (payloadSize < 3 || payload[0] != 0x49 || payload[1] != 0x02) {
+    if (payloadSize < 3 || payload[0] != 0x62 || payload[1] != 0xF1 || payload[2] != 0x90) {
         return {};
     }
 
-    size_t vinOffset = 2;
-    if (payloadSize >= 4 && payload[2] == 0x01) {
-        vinOffset = 3;
-    }
-
     std::string vin;
-    for (size_t i = vinOffset; i < payloadSize && vin.size() < 17; ++i) {
+    for (size_t i = 3; i < payloadSize && vin.size() < 17; ++i) {
         const unsigned char ch = payload[i];
         if (std::isalnum(ch)) {
             vin.push_back(static_cast<char>(ch));
@@ -196,16 +189,18 @@ void clearRxBuffer(const J2534Api& api, unsigned long channelId) {
     }
 }
 
-std::string requestVin(const J2534Api& api, unsigned long channelId, unsigned long requestId, unsigned long totalReadTimeMs) {
+std::string requestVin(const J2534Api& api, unsigned long channelId, unsigned long requestId, unsigned long totalReadTimeMs, bool quietErrors) {
     clearRxBuffer(api, channelId);
 
     PASSTHRU_MSG request{};
-    setPayload(request, requestId, {0x09, 0x02});
+    setPayload(request, requestId, {0x22, 0xF1, 0x90});
     unsigned long requestCount = 1;
     long status = api.PassThruWriteMsgs(channelId, &request, &requestCount, 1000);
     if (status != STATUS_NOERROR || requestCount != 1) {
-        std::cerr << "PassThruWriteMsgs failed for request ID 0x" << std::hex << requestId << " with 0x" << status << std::dec
-                  << ": " << lastJ2534Error(api) << "\n";
+        if (!quietErrors) {
+            std::cerr << "PassThruWriteMsgs failed for request ID 0x" << std::hex << requestId << " with 0x" << status << std::dec
+                      << ": " << lastJ2534Error(api) << "\n";
+        }
         return {};
     }
 
@@ -220,7 +215,9 @@ std::string requestVin(const J2534Api& api, unsigned long channelId, unsigned lo
                 return vin;
             }
         } else if (status != ERR_BUFFER_EMPTY) {
-            std::cerr << "PassThruReadMsgs failed with 0x" << std::hex << status << std::dec << ": " << lastJ2534Error(api) << "\n";
+            if (!quietErrors) {
+                std::cerr << "PassThruReadMsgs failed with 0x" << std::hex << status << std::dec << ": " << lastJ2534Error(api) << "\n";
+            }
             return {};
         }
     }
@@ -246,11 +243,9 @@ bool readVin(const J2534Api& api) {
 
     installVinFilter(api, channelId);
 
-    std::string vin = requestVin(api, channelId, kObdRequestId, kFunctionalReadTimeMs);
-    if (vin.empty()) {
-        for (unsigned long offset = 0; offset < 8 && vin.empty(); ++offset) {
-            vin = requestVin(api, channelId, kObdPhysicalRequestBase + offset, kPhysicalReadTimeMs);
-        }
+    std::string vin;
+    for (unsigned long offset = 0; offset < 8 && vin.empty(); ++offset) {
+        vin = requestVin(api, channelId, kObdPhysicalRequestBase + offset, kPhysicalReadTimeMs, true);
     }
     if (!vin.empty()) {
         std::cout << "VIN: " << vin << "\n";
@@ -269,7 +264,7 @@ void printUsage(const char* exeName) {
     std::cerr
         << "Usage: " << exeName << " [--check-exports] [pico_j2534.dll]\n"
         << "\n"
-        << "Without --check-exports, opens the DLL through J2534 and sends OBD-II service 09 PID 02\n"
+        << "Without --check-exports, opens the DLL through J2534 and sends UDS service 22 DID F190\n"
         << "over ISO15765 at 500 kbit/s to read and print the vehicle VIN.\n";
 }
 

@@ -1,0 +1,16 @@
+LIBRARY "pico_j2534"
+EXPORTS
+    PassThruOpen = PassThruOpen@8
+    PassThruClose = PassThruClose@4
+    PassThruConnect = PassThruConnect@20
+    PassThruDisconnect = PassThruDisconnect@4
+    PassThruReadMsgs = PassThruReadMsgs@16
+    PassThruWriteMsgs = PassThruWriteMsgs@16
+    PassThruStartPeriodicMsg = PassThruStartPeriodicMsg@16
+    PassThruStopPeriodicMsg = PassThruStopPeriodicMsg@8
+    PassThruStartMsgFilter = PassThruStartMsgFilter@24
+    PassThruStopMsgFilter = PassThruStopMsgFilter@8
+    PassThruSetProgrammingVoltage = PassThruSetProgrammingVoltage@12
+    PassThruReadVersion = PassThruReadVersion@16
+    PassThruGetLastError = PassThruGetLastError@4
+    PassThruIoctl = PassThruIoctl@16

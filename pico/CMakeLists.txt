@@ -21,9 +21,10 @@ add_executable(pico_j2534
     src/main.c
     src/mcp2515.c
     src/usb_descriptors.c
+    third_party/isotp-c/isotp.c
 )
 
-target_include_directories(pico_j2534 PRIVATE include)
+target_include_directories(pico_j2534 PRIVATE include third_party/isotp-c)
 set(PICOJ_MCP2515_OSC_HZ "" CACHE STRING "MCP2515 crystal frequency in Hz, usually 8000000 or 16000000")
 if(PICOJ_MCP2515_OSC_HZ)
     target_compile_definitions(pico_j2534 PRIVATE PICOJ_MCP2515_OSC_HZ=${PICOJ_MCP2515_OSC_HZ})

@@ -2,7 +2,7 @@
 
 This folder contains a Windows J2534-1 PassThru DLL for DTS Monaco and other J2534 clients.
 
-The DLL talks to the RP2350 board with WinUSB bulk endpoints. The firmware exposes a composite USB device with an unused CDC interface plus Microsoft OS 2.0 descriptors so Windows 10/11 can bind the inbox WinUSB driver automatically after first plug-in, without a custom INF. The DLL supports one CAN channel and exposes `CAN` and `ISO15765`.
+The DLL talks to the RP2350 board with WinUSB bulk endpoints. The firmware exposes a composite USB device with an unused CDC interface plus Microsoft OS 2.0 descriptors so Windows 10/11 can bind the inbox WinUSB driver automatically after first plug-in, without a custom INF. The DLL supports one physical CAN channel and exposes `CAN` and `ISO15765`.
 
 ## Build
 
@@ -49,7 +49,9 @@ The DLL is a practical starter VCI:
 - J2534 exports with undecorated names through `pico_j2534.def`.
 - WinUSB interface discovery by DeviceInterfaceGUID `{A9F78E2A-39A0-4A36-A6DF-6D80C96F54E1}`.
 - Classic CAN transmit/receive.
-- Basic ISO-TP segmentation and reassembly for normal addressing.
-- Stubbed acceptance for pass and flow-control filters so common J2534 clients can continue initialization.
+- J2534 `LOOPBACK` support for CAN transmit confirmations (`TX_MSG_TYPE` readback).
+- Firmware-side ISO-TP segmentation, flow control, and reassembly for normal addressing via `isotp-c`.
+- J2534 pass/block filters and ISO-TP flow-control filters for normal addressing.
+- CAN and ISO15765 only. Legacy protocols, fake voltage readings, and programming-voltage no-ops are intentionally not exposed.
 
-ISO-TP flow-control timing is intentionally simple in this first version. For heavy flashing workloads, add full FC/BS/STmin handling in `src/isotp.cpp` and `src/j2534.cpp`.
+Classic CAN is intentionally kept as a first-class path because J2534 clients can open the `CAN` protocol directly, and it remains useful for bus checks, filters, and tools that do not use ISO15765. The DLL no longer contains its own ISO-TP transport state machine; ISO15765 payloads are moved between the DLL and firmware as USB chunks, while the Pico firmware handles CAN-frame timing with `isotp-c`.

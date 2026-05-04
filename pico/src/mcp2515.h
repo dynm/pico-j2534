@@ -8,6 +8,7 @@
 void mcp2515_hw_init(void);
 bool mcp2515_init(uint32_t bitrate);
 bool mcp2515_set_bitrate(uint32_t bitrate);
+bool mcp2515_poll(void);
 typedef enum {
     MCP2515_TX_OK = 0,
     MCP2515_TX_BUSY,

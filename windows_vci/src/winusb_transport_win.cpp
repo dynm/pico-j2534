@@ -20,6 +20,10 @@ constexpr GUID kPicoJ2534InterfaceGuid = {
 constexpr uint8_t kInvalidPipe = 0;
 constexpr size_t kMaxPendingPackets = 256;
 
+bool isUnsolicitedPacket(uint8_t cmd) {
+    return cmd == PICOJ_CMD_CAN_RX || cmd == PICOJ_CMD_ISOTP_RX;
+}
+
 std::string windowsError(const char* prefix, DWORD error) {
     char buffer[160]{};
     std::snprintf(buffer, sizeof(buffer), "%s (GetLastError=%lu)", prefix, static_cast<unsigned long>(error));
@@ -194,8 +198,6 @@ bool WinUsbTransport::transact(uint8_t cmd, const void* outData, uint8_t outLen,
         return false;
     }
 
-    flushInputUnlocked();
-
     picoj_packet_t request{};
     request.magic = PICOJ_PACKET_MAGIC;
     request.seq = seq_;
@@ -223,7 +225,7 @@ bool WinUsbTransport::transact(uint8_t cmd, const void* outData, uint8_t outLen,
             return false;
         }
 
-        if (response.cmd == PICOJ_CMD_CAN_RX) {
+        if (isUnsolicitedPacket(response.cmd)) {
             if (pendingPackets_.size() >= kMaxPendingPackets) {
                 pendingPackets_.pop_front();
             }
