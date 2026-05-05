@@ -35,8 +35,7 @@ bool isTimeoutError(DWORD error) {
 }
 
 bool isDisconnectError(DWORD error) {
-    return error == ERROR_DEVICE_NOT_CONNECTED || error == ERROR_DEV_NOT_EXIST || error == ERROR_INVALID_HANDLE ||
-           error == ERROR_GEN_FAILURE || error == ERROR_NOT_READY;
+    return error == ERROR_DEVICE_NOT_CONNECTED || error == ERROR_DEV_NOT_EXIST || error == ERROR_INVALID_HANDLE;
 }
 
 }

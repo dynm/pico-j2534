@@ -26,7 +26,8 @@ constexpr size_t kMaxFilters = 64;
 constexpr size_t kMaxPeriodicMsgs = 16;
 constexpr size_t kMaxRxQueueFrames = 4096;
 constexpr size_t kMaxIsoRxQueueFrames = 256;
-constexpr const char* kDllVersion = "pico_j2534_dll 0.2";
+constexpr const char* kDllVersion = "pico_j2534_dll 0.2.1";
+constexpr const char* kFrameTraceEnv = "PICO_J2534_TRACE_FRAMES";
 
 struct IsoTpFrame {
     uint32_t canId = 0;
@@ -144,6 +145,19 @@ void logUnsupported(const char* function, const char* format, ...) {
     std::vsnprintf(details, sizeof(details), format, args);
     va_end(args);
     logEvent(function, "unsupported: %s", details);
+}
+
+bool traceFrameTraffic() {
+    static int cached = -1;
+    if (cached >= 0) {
+        return cached != 0;
+    }
+
+    char value[16]{};
+    DWORD len = GetEnvironmentVariableA(kFrameTraceEnv, value, static_cast<DWORD>(sizeof(value)));
+    cached = (len > 0 && value[0] != '\0' && value[0] != '0') ? 1 : 0;
+    logEvent("LOG_CONFIG", "FrameTrace=%u Env=%s", cached ? 1u : 0u, kFrameTraceEnv);
+    return cached != 0;
 }
 
 bool isCanProtocol(unsigned long protocol) {
@@ -503,14 +517,16 @@ bool framePassesFilters(const std::array<MessageFilter, kMaxFilters>& filters,
                         const picoj_can_frame_t& frame) {
     for (const auto& filter : filters) {
         if (filter.active && filter.type == BLOCK_FILTER && frameMatchesFilter(frame, filter)) {
-            logEvent("PassThruReadMsgs",
-                     "RX BLOCKED ChannelID=%lu FilterID=%lu CAN=0x%08lX Pattern=0x%08lX Mask=0x%08lX Data=[%s]",
-                     channelId,
-                     filter.id,
-                     static_cast<unsigned long>(frame.can_id),
-                     static_cast<unsigned long>(filter.patternCanId),
-                     static_cast<unsigned long>(filter.maskCanId),
-                     hexBytes(frame.data, frame.dlc, 8).c_str());
+            if (traceFrameTraffic()) {
+                logEvent("PassThruReadMsgs",
+                         "RX BLOCKED ChannelID=%lu FilterID=%lu CAN=0x%08lX Pattern=0x%08lX Mask=0x%08lX Data=[%s]",
+                         channelId,
+                         filter.id,
+                         static_cast<unsigned long>(frame.can_id),
+                         static_cast<unsigned long>(filter.patternCanId),
+                         static_cast<unsigned long>(filter.maskCanId),
+                         hexBytes(frame.data, frame.dlc, 8).c_str());
+            }
             logFilteredFrame(channelId, frame, "BLOCK_FILTER");
             return false;
         }
@@ -523,14 +539,16 @@ bool framePassesFilters(const std::array<MessageFilter, kMaxFilters>& filters,
         }
         hasPassFilter = true;
         if (frameMatchesFilter(frame, filter)) {
-            logEvent("PassThruReadMsgs",
-                     "RX PASS ChannelID=%lu FilterID=%lu CAN=0x%08lX Pattern=0x%08lX Mask=0x%08lX Data=[%s]",
-                     channelId,
-                     filter.id,
-                     static_cast<unsigned long>(frame.can_id),
-                     static_cast<unsigned long>(filter.patternCanId),
-                     static_cast<unsigned long>(filter.maskCanId),
-                     hexBytes(frame.data, frame.dlc, 8).c_str());
+            if (traceFrameTraffic()) {
+                logEvent("PassThruReadMsgs",
+                         "RX PASS ChannelID=%lu FilterID=%lu CAN=0x%08lX Pattern=0x%08lX Mask=0x%08lX Data=[%s]",
+                         channelId,
+                         filter.id,
+                         static_cast<unsigned long>(frame.can_id),
+                         static_cast<unsigned long>(filter.patternCanId),
+                         static_cast<unsigned long>(filter.maskCanId),
+                         hexBytes(frame.data, frame.dlc, 8).c_str());
+            }
             return true;
         }
     }
@@ -566,16 +584,18 @@ void queueRxFrame(std::deque<QueuedCanFrame>& queue, unsigned long channelId, co
     queued.frame = frame;
     queued.rxStatus = rxStatus;
     queue.push_back(queued);
-    logEvent("PassThruReadMsgs",
-             "%s ChannelID=%lu CAN=0x%08lX Extended=%u RTR=%u DLC=%u RxStatus=0x%08lX Data=[%s]",
-             (rxStatus & TX_MSG_TYPE) ? "TX LOOPBACK QUEUED" : "RX QUEUED",
-             channelId,
-             static_cast<unsigned long>(frame.can_id),
-             (frame.flags & PICOJ_CAN_EXTENDED) ? 1u : 0u,
-             (frame.flags & PICOJ_CAN_RTR) ? 1u : 0u,
-             frame.dlc,
-             rxStatus,
-             hexBytes(frame.data, frame.dlc, 8).c_str());
+    if ((rxStatus & TX_MSG_TYPE) || traceFrameTraffic()) {
+        logEvent("PassThruReadMsgs",
+                 "%s ChannelID=%lu CAN=0x%08lX Extended=%u RTR=%u DLC=%u RxStatus=0x%08lX Data=[%s]",
+                 (rxStatus & TX_MSG_TYPE) ? "TX LOOPBACK QUEUED" : "RX QUEUED",
+                 channelId,
+                 static_cast<unsigned long>(frame.can_id),
+                 (frame.flags & PICOJ_CAN_EXTENDED) ? 1u : 0u,
+                 (frame.flags & PICOJ_CAN_RTR) ? 1u : 0u,
+                 frame.dlc,
+                 rxStatus,
+                 hexBytes(frame.data, frame.dlc, 8).c_str());
+    }
 }
 
 void queueTxLoopbackFrame(unsigned long channelId, const picoj_can_frame_t& frame) {
@@ -592,7 +612,9 @@ void queueIsoTpFrameLocked(IsoTpFrame&& frame) {
 }
 
 void fanoutCanFrameLocked(const picoj_can_frame_t& frame) {
-    logCanFrame("PassThruReadMsgs", "RX USB_CAN", kChannelId, frame);
+    if (traceFrameTraffic()) {
+        logCanFrame("PassThruReadMsgs", "RX USB_CAN", kChannelId, frame);
+    }
     if (g_channel.connected && framePassesFilters(g_channel.filters, kChannelId, frame)) {
         queueRxFrame(g_channel.rxQueue, kChannelId, frame);
     }
@@ -1317,7 +1339,9 @@ extern "C" long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG* p
                     return status;
                 }
                 if (appended) {
-                    logPassThruMsg("PassThruReadMsgs", "DELIVER_CAN", ChannelID, pMsg[*pNumMsgs]);
+                    if (traceFrameTraffic() || (pMsg[*pNumMsgs].RxStatus & TX_MSG_TYPE)) {
+                        logPassThruMsg("PassThruReadMsgs", "DELIVER_CAN", ChannelID, pMsg[*pNumMsgs]);
+                    }
                     ++(*pNumMsgs);
                 }
                 continue;
@@ -1338,6 +1362,17 @@ extern "C" long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG* p
         picoj_packet_t packet{};
         const unsigned readTimeout = nonBlocking ? 1u : std::min<unsigned>(kReadPollSliceMs, Timeout - elapsed);
         if (!g_usb.readPacket(packet, readTimeout)) {
+            logEvent("PassThruReadMsgs",
+                     "USB_READ_FAIL ChannelID=%lu Requested=%lu Delivered=%lu Timeout=%lu ReadTimeout=%u NonBlocking=%u UsbOpen=%u TimedOut=%u Error=%s",
+                     ChannelID,
+                     requested,
+                     *pNumMsgs,
+                     Timeout,
+                     readTimeout,
+                     nonBlocking ? 1u : 0u,
+                     g_usb.isOpen() ? 1u : 0u,
+                     g_usb.lastErrorWasTimeout() ? 1u : 0u,
+                     g_usb.lastError().c_str());
             if (!g_usb.isOpen()) {
                 std::lock_guard<std::mutex> lock(g_lock);
                 setLastError(g_usb.lastError());
@@ -1721,6 +1756,22 @@ extern "C" long WINAPI PassThruIoctl(unsigned long ChannelID, unsigned long Ioct
              pInput,
              pOutput);
     std::lock_guard<std::mutex> lock(g_lock);
+    if (IoctlID == READ_VBATT || IoctlID == READ_PROG_VOLTAGE) {
+        if (!g_usb.isOpen()) {
+            setLastError("Pico J2534 device is not open");
+            return ERR_DEVICE_NOT_CONNECTED;
+        }
+        if (!pOutput) {
+            setLastError("Null voltage output pointer");
+            return ERR_NULL_PARAMETER;
+        }
+        logUnsupported("PassThruIoctl",
+                       "%s is unavailable because the hardware does not measure J1962 voltage",
+                       ioctlName(IoctlID));
+        setLastError("Vehicle voltage measurement is not supported");
+        return ERR_NOT_SUPPORTED;
+    }
+
     long status = ensureChannel(ChannelID);
     if (status != STATUS_NOERROR) {
         return status;
