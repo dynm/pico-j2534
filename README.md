@@ -1,7 +1,5 @@
 # pico_j2534
 
-> Important: WIP, don't use until this line is removed.
-
 This repository contains a starter J2534 VCI split into the requested folders:
 
 - `windows_vci`: Windows J2534 PassThru DLL source for DTS Monaco.
